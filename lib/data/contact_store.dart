@@ -2,82 +2,115 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 
 import '../models/contact.dart';
 import '../models/field_schema.dart';
+import 'crypto.dart';
 
-/// Хранит контакты в JSON-файле, а фото — копиями в отдельной папке
-/// внутри Application Support, чтобы не зависеть от исходных файлов.
+/// Хранит контакты в зашифрованном JSON-файле, а фото — зашифрованными
+/// копиями в отдельной папке, чтобы не зависеть от исходных файлов.
 class ContactStore extends ChangeNotifier {
   static const _uuid = Uuid();
 
+  /// Сколько контакт лежит в корзине, прежде чем удалиться навсегда.
+  static const trashDays = 30;
+
   late final Directory _root;
   late final Directory _photos;
-  final List<Contact> _contacts = [];
+  late final DataCipher _cipher;
+
+  /// Все контакты, включая корзину.
+  final List<Contact> _all = [];
   final List<FieldSection> _sections = [];
 
-  List<Contact> get contacts => List.unmodifiable(_contacts);
+  /// Расшифрованные фото — чтобы не расшифровывать их при каждой перерисовке.
+  final Map<String, Uint8List> _photoCache = {};
+
+  /// Активные контакты, без корзины.
+  List<Contact> get contacts => List.unmodifiable(_all.where((c) => !c.isDeleted));
+
+  /// Корзина: сначала недавно удалённые.
+  List<Contact> get trash =>
+      _all.where((c) => c.isDeleted).toList()..sort((a, b) => b.deletedAt!.compareTo(a.deletedAt!));
+
+  DataCipher get cipher => _cipher;
   List<FieldSection> get sections => List.unmodifiable(_sections);
   Iterable<CustomField> get allFields => _sections.expand((s) => s.fields);
   List<CustomField> get tableFields =>
       allFields.where((f) => f.showInTable).toList();
 
-  /// [root] задают тесты; приложение хранит данные в Application Support.
-  Future<void> load({Directory? root}) async {
-    _root = root ?? await getApplicationSupportDirectory();
+  /// Читает базу из [root], расшифровывая ключом [cipher]. Данные,
+  /// сохранённые до появления шифрования, при этом зашифровываются.
+  Future<void> load({required Directory root, required DataCipher cipher}) async {
+    _root = root;
+    _cipher = cipher;
     _photos = Directory('${_root.path}/photos');
     await _photos.create(recursive: true);
 
-    final file = _dbFile;
-    if (await file.exists()) {
-      final raw = jsonDecode(await file.readAsString()) as List;
-      _contacts
-        ..clear()
-        ..addAll(raw.map((e) => Contact.fromJson(e as Map<String, dynamic>)));
-    }
+    final (raw, plainDb) = await _readJson(_dbFile);
+    _all
+      ..clear()
+      ..addAll([
+        for (final e in (raw as List?) ?? const []) Contact.fromJson(e as Map<String, dynamic>),
+      ]);
     _sort();
-    await _loadSchema();
+    final plainSchema = await _loadSchema();
+    if (plainDb) await _persist();
+    if (plainSchema) await _writeJson(_schemaFile, _sections.map((s) => s.toJson()).toList());
+    await _encryptLegacyPhotos();
+    await _purgeExpiredTrash();
     await _collectOrphanPhotos();
     notifyListeners();
   }
 
   File get _schemaFile => File('${_root.path}/schema.json');
 
-  Future<void> _loadSchema() async {
+  /// Возвращает true, если файл схемы был незашифрованным.
+  Future<bool> _loadSchema() async {
     _sections.clear();
-    if (await _schemaFile.exists()) {
-      final raw = jsonDecode(await _schemaFile.readAsString()) as List;
-      _sections.addAll(raw.map((e) => FieldSection.fromJson(e as Map<String, dynamic>)));
+    final (raw, plain) = await _readJson(_schemaFile);
+    if (raw != null) {
+      _sections.addAll((raw as List).map((e) => FieldSection.fromJson(e as Map<String, dynamic>)));
     }
     // Стандартные разделы есть всегда, даже если файл схемы старый.
     for (final b in BuiltIn.sections) {
       if (!_sections.any((s) => s.id == b.id)) _sections.add(b);
     }
+    return plain;
   }
 
   File get _dbFile => File('${_root.path}/contacts.json');
 
-  File? photoOf(Contact c) => photoFile(c.photoFile);
+  /// Есть ли файл фото на диске — чтобы не рисовать пустой кружок.
+  bool hasPhoto(String? name) =>
+      name != null && (_photoCache.containsKey(name) || File('${_photos.path}/$name').existsSync());
 
-  File? photoFile(String? name) =>
-      name == null ? null : File('${_photos.path}/$name');
+  /// Расшифрованное фото; null — фото нет или файл потерян.
+  Future<Uint8List?> readPhoto(String name) async {
+    final cached = _photoCache[name];
+    if (cached != null) return cached;
+    final f = File('${_photos.path}/$name');
+    if (!await f.exists()) return null;
+    final bytes = await f.readAsBytes();
+    final plain = DataCipher.isEncrypted(bytes) ? await _cipher.decrypt(bytes) : bytes;
+    return _photoCache[name] = plain;
+  }
 
+  /// Ищет и среди активных, и в корзине.
   Contact? byId(String id) {
-    for (final c in _contacts) {
+    for (final c in _all) {
       if (c.id == id) return c;
     }
     return null;
   }
 
-  Set<String> get allInterests =>
-      {for (final c in _contacts) ...c.interests};
+  Set<String> get allInterests => {for (final c in contacts) ...c.interests};
 
   /// Интересы с числом контактов, от популярных к редким.
   List<MapEntry<String, int>> get interestCounts {
     final counts = <String, int>{};
-    for (final c in _contacts) {
+    for (final c in contacts) {
       for (final i in c.interests) {
         counts[i] = (counts[i] ?? 0) + 1;
       }
@@ -100,11 +133,11 @@ class ContactStore extends ChangeNotifier {
       await _deletePhoto(old.photoFile!);
     }
     final updated = contact.copyWith(updatedAt: DateTime.now());
-    final i = _contacts.indexWhere((c) => c.id == contact.id);
+    final i = _all.indexWhere((c) => c.id == contact.id);
     if (i == -1) {
-      _contacts.add(updated);
+      _all.add(updated);
     } else {
-      _contacts[i] = updated;
+      _all[i] = updated;
     }
     _sort();
     await _persist();
@@ -115,25 +148,152 @@ class ContactStore extends ChangeNotifier {
       save(c.copyWith(favorite: !c.favorite));
 
   Future<void> setFavorite(Set<String> ids, bool value) async {
-    for (var i = 0; i < _contacts.length; i++) {
-      if (ids.contains(_contacts[i].id)) {
-        _contacts[i] = _contacts[i].copyWith(favorite: value);
-      }
-    }
+    _update(ids, (c) => c.copyWith(favorite: value));
     await _persist();
     notifyListeners();
   }
 
+  void _update(Set<String> ids, Contact Function(Contact) change) {
+    for (var i = 0; i < _all.length; i++) {
+      if (ids.contains(_all[i].id)) _all[i] = change(_all[i]);
+    }
+  }
+
+  /// Переносит в корзину — восстановить можно ещё [trashDays] дней.
   Future<void> delete(Contact contact) => deleteMany({contact.id});
 
   Future<void> deleteMany(Set<String> ids) async {
-    final removed = _contacts.where((c) => ids.contains(c.id)).toList();
-    _contacts.removeWhere((c) => ids.contains(c.id));
+    final now = DateTime.now();
+    _update(ids, (c) => c.copyWith(deletedAt: () => now));
+    await _persist();
+    notifyListeners();
+  }
+
+  Future<void> restore(Set<String> ids) async {
+    _update(ids, (c) => c.copyWith(deletedAt: () => null));
+    await _persist();
+    notifyListeners();
+  }
+
+  /// Удаляет навсегда, вместе с фото.
+  Future<void> purge(Set<String> ids) async {
+    final removed = _all.where((c) => ids.contains(c.id)).toList();
+    _all.removeWhere((c) => ids.contains(c.id));
     for (final c in removed) {
       if (c.photoFile != null) await _deletePhoto(c.photoFile!);
     }
     await _persist();
     notifyListeners();
+  }
+
+  Future<void> emptyTrash() => purge({for (final c in trash) c.id});
+
+  Future<void> _purgeExpiredTrash() async {
+    final limit = DateTime.now().subtract(const Duration(days: trashDays));
+    final expired = {for (final c in _all) if (c.isDeleted && c.deletedAt!.isBefore(limit)) c.id};
+    if (expired.isNotEmpty) await purge(expired);
+  }
+
+  // ── Импорт и резервные копии ──
+
+  /// Ключ для поиска дублей: имя плюс телефон или почта.
+  static String _identity(Contact c) {
+    final digits = c.phone.replaceAll(RegExp(r'\D'), '');
+    final phone = digits.length > 10 ? digits.substring(digits.length - 10) : digits;
+    return '${c.name.trim().toLowerCase()}|${phone.isNotEmpty ? phone : c.email.trim().toLowerCase()}';
+  }
+
+  /// Уже есть такой человек среди активных контактов.
+  bool isDuplicate(Contact c) {
+    final key = _identity(c);
+    return contacts.any((x) => _identity(x) == key);
+  }
+
+  /// Добавляет импортированные контакты; [photos] — фото по id контакта.
+  /// Возвращает id добавленных, чтобы импорт можно было отменить.
+  Future<Set<String>> addImported(List<Contact> drafts, {Map<String, Uint8List> photos = const {}}) async {
+    final now = DateTime.now();
+    final added = <String>{};
+    for (final d in drafts) {
+      final photo = photos[d.id];
+      final c = Contact(
+        id: _uuid.v4(),
+        name: d.name,
+        phone: d.phone,
+        telegram: d.telegram,
+        email: d.email,
+        position: d.position,
+        company: d.company,
+        whereMet: d.whereMet,
+        metDate: d.metDate,
+        birthday: d.birthday,
+        interests: d.interests,
+        notes: d.notes,
+        custom: d.custom,
+        photoFile: photo == null ? null : await _writePhoto(photo),
+        favorite: d.favorite,
+        createdAt: now,
+        updatedAt: now,
+      );
+      _all.add(c);
+      added.add(c.id);
+    }
+    _sort();
+    await _persist();
+    notifyListeners();
+    return added;
+  }
+
+  /// Снимок всей базы для резервной копии — фото уже расшифрованы.
+  Future<Map<String, dynamic>> snapshot() async => {
+        'contacts': _all.map((c) => c.toJson()).toList(),
+        'sections': _sections.map((s) => s.toJson()).toList(),
+        'photos': {
+          for (final c in _all)
+            if (c.photoFile != null)
+              if (await readPhoto(c.photoFile!) case final bytes?) c.photoFile!: base64.encode(bytes),
+        },
+      };
+
+  /// Вливает резервную копию: новых людей добавляет, у известных
+  /// оставляет более свежую версию. Свои поля и разделы объединяет.
+  Future<({int added, int updated})> mergeSnapshot(Map<String, dynamic> snap) async {
+    final photos = (snap['photos'] as Map?)?.cast<String, String>() ?? const {};
+    var added = 0, updated = 0;
+    for (final e in (snap['contacts'] as List?) ?? const []) {
+      final c = Contact.fromJson(e as Map<String, dynamic>);
+      final i = _all.indexWhere((x) => x.id == c.id);
+      if (i != -1 && !c.updatedAt.isAfter(_all[i].updatedAt)) continue;
+      var photoFile = c.photoFile;
+      if (photoFile != null) {
+        final data = photos[photoFile];
+        photoFile = data == null ? null : await _writePhoto(base64.decode(data));
+      }
+      final restored = c.copyWith(photoFile: () => photoFile, updatedAt: c.updatedAt);
+      if (i == -1) {
+        _all.add(restored);
+        added++;
+      } else {
+        if (_all[i].photoFile != null) await _deletePhoto(_all[i].photoFile!);
+        _all[i] = restored;
+        updated++;
+      }
+    }
+    for (final e in (snap['sections'] as List?) ?? const []) {
+      final s = FieldSection.fromJson(e as Map<String, dynamic>);
+      final existing = sectionById(s.id);
+      if (existing == null) {
+        _sections.add(s);
+      } else {
+        final known = {for (final f in existing.fields) f.id};
+        _replaceSection(existing.copyWith(
+            fields: [...existing.fields, ...s.fields.where((f) => !known.contains(f.id))]));
+      }
+    }
+    _sort();
+    await _persist();
+    await _schemaChanged();
+    return (added: added, updated: updated);
   }
 
   // ── Схема пользовательских полей ──
@@ -221,10 +381,10 @@ class ContactStore extends ChangeNotifier {
   /// Убирает у всех контактов значения удалённых полей.
   Future<void> _purgeValues(Set<String> fieldIds) async {
     var changed = false;
-    for (var i = 0; i < _contacts.length; i++) {
-      final c = _contacts[i];
+    for (var i = 0; i < _all.length; i++) {
+      final c = _all[i];
       if (c.custom.keys.any(fieldIds.contains)) {
-        _contacts[i] = c.copyWith(
+        _all[i] = c.copyWith(
             custom: {...c.custom}..removeWhere((k, _) => fieldIds.contains(k)));
         changed = true;
       }
@@ -237,46 +397,73 @@ class ContactStore extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Копирует выбранное изображение в хранилище и возвращает имя файла.
-  Future<String> importPhoto(String sourcePath) async {
-    final dot = sourcePath.lastIndexOf('.');
-    final ext = dot == -1 ? '' : sourcePath.substring(dot).toLowerCase();
-    final name = '${_uuid.v4()}$ext';
-    await File(sourcePath).copy('${_photos.path}/$name');
+  /// Шифрует выбранное изображение в хранилище и возвращает имя файла.
+  Future<String> importPhoto(String sourcePath) async =>
+      _writePhoto(await File(sourcePath).readAsBytes());
+
+  Future<String> _writePhoto(Uint8List bytes) async {
+    final name = '${_uuid.v4()}.enc';
+    await File('${_photos.path}/$name').writeAsBytes(await _cipher.encrypt(bytes));
+    _photoCache[name] = bytes;
     return name;
   }
 
   /// Удаляет фото, которое было импортировано в черновик, но не сохранено.
   Future<void> discardPhoto(String fileName) async {
-    final usedBySaved = _contacts.any((c) => c.photoFile == fileName);
+    final usedBySaved = _all.any((c) => c.photoFile == fileName);
     if (!usedBySaved) await _deletePhoto(fileName);
   }
 
   Future<void> _deletePhoto(String fileName) async {
+    _photoCache.remove(fileName);
     final f = File('${_photos.path}/$fileName');
     if (await f.exists()) await f.delete();
   }
 
+  /// Фото, сохранённые до появления шифрования, шифруем на месте.
+  Future<void> _encryptLegacyPhotos() async {
+    await for (final f in _photos.list()) {
+      if (f is! File) continue;
+      // Достаточно заголовка, чтобы не читать целиком уже зашифрованные.
+      final head = await f.openRead(0, 4).expand((b) => b).toList();
+      if (DataCipher.isEncrypted(head)) continue;
+      final bytes = await f.readAsBytes();
+      final tmp = File('${f.path}.tmp');
+      await tmp.writeAsBytes(await _cipher.encrypt(bytes));
+      await tmp.rename(f.path);
+    }
+  }
+
   /// Фото из черновиков, закрытых без сохранения, ни на что не ссылаются.
   Future<void> _collectOrphanPhotos() async {
-    final used = {for (final c in _contacts) c.photoFile};
+    final used = {for (final c in _all) c.photoFile};
     await for (final f in _photos.list()) {
       final name = f.uri.pathSegments.last;
       if (f is File && !used.contains(name)) await f.delete();
     }
   }
 
-  void _sort() => _contacts.sort(
+  void _sort() => _all.sort(
       (a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
 
   Future<void> _persist() =>
-      _writeJson(_dbFile, _contacts.map((c) => c.toJson()).toList());
+      _writeJson(_dbFile, _all.map((c) => c.toJson()).toList());
+
+  /// Читает JSON-файл: (данные или null, был ли файл незашифрованным).
+  Future<(Object?, bool)> _readJson(File file) async {
+    if (!await file.exists()) return (null, false);
+    final bytes = await file.readAsBytes();
+    if (DataCipher.isEncrypted(bytes)) {
+      return (jsonDecode(utf8.decode(await _cipher.decrypt(bytes))), false);
+    }
+    return (jsonDecode(utf8.decode(bytes)), true);
+  }
 
   Future<void> _writeJson(File file, Object data) async {
     // Пишем во временный файл и переименовываем, чтобы сбой посреди
     // записи не оставил файл обрезанным.
     final tmp = File('${file.path}.tmp');
-    await tmp.writeAsString(const JsonEncoder.withIndent('  ').convert(data));
+    await tmp.writeAsBytes(await _cipher.encrypt(utf8.encode(jsonEncode(data))));
     await tmp.rename(file.path);
   }
 }

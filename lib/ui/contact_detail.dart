@@ -17,6 +17,10 @@ class ContactDetail extends StatelessWidget {
   final VoidCallback onDelete;
   final VoidCallback onClose;
 
+  /// Для контакта из корзины — вместо правки и удаления.
+  final VoidCallback onRestore;
+  final VoidCallback onPurge;
+
   const ContactDetail({
     super.key,
     required this.contact,
@@ -24,6 +28,8 @@ class ContactDetail extends StatelessWidget {
     required this.onEdit,
     required this.onDelete,
     required this.onClose,
+    required this.onRestore,
+    required this.onPurge,
   });
 
   @override
@@ -51,26 +57,42 @@ class ContactDetail extends StatelessWidget {
             children: [
               SquareIconButton(icon: Icons.close, tooltip: 'Закрыть', onPressed: onClose),
               const Spacer(),
-              SquareIconButton(
-                icon: x.favorite ? Icons.star_rounded : Icons.star_outline_rounded,
-                color: x.favorite ? c.star : null,
-                tooltip: x.favorite ? 'Убрать из избранного' : 'В избранное',
-                onPressed: () => store.toggleFavorite(x),
-              ),
-              const SizedBox(width: 8),
-              SquareIconButton(
-                icon: Icons.delete_outline_rounded,
-                tooltip: 'Удалить',
-                color: c.danger,
-                onPressed: onDelete,
-              ),
-              const SizedBox(width: 8),
-              AppButton(
-                label: 'Изменить',
-                icon: Icons.edit_outlined,
-                primary: true,
-                onPressed: onEdit,
-              ),
+              if (x.isDeleted) ...[
+                AppButton(
+                  label: 'Удалить навсегда',
+                  icon: Icons.delete_forever_outlined,
+                  danger: true,
+                  onPressed: onPurge,
+                ),
+                const SizedBox(width: 8),
+                AppButton(
+                  label: 'Восстановить',
+                  icon: Icons.restore_rounded,
+                  primary: true,
+                  onPressed: onRestore,
+                ),
+              ] else ...[
+                SquareIconButton(
+                  icon: x.favorite ? Icons.star_rounded : Icons.star_outline_rounded,
+                  color: x.favorite ? c.star : null,
+                  tooltip: x.favorite ? 'Убрать из избранного' : 'В избранное',
+                  onPressed: () => store.toggleFavorite(x),
+                ),
+                const SizedBox(width: 8),
+                SquareIconButton(
+                  icon: Icons.delete_outline_rounded,
+                  tooltip: 'В корзину',
+                  color: c.danger,
+                  onPressed: onDelete,
+                ),
+                const SizedBox(width: 8),
+                AppButton(
+                  label: 'Изменить',
+                  icon: Icons.edit_outlined,
+                  primary: true,
+                  onPressed: onEdit,
+                ),
+              ],
             ],
           ),
         ),
@@ -100,6 +122,17 @@ class ContactDetail extends StatelessWidget {
                   subtitle,
                   textAlign: TextAlign.center,
                   style: TextStyle(fontSize: 14, color: c.textMuted),
+                ),
+              ],
+              if (x.isDeleted) ...[
+                const SizedBox(height: 10),
+                Center(
+                  child: Tag(
+                    _trashNote(x.deletedAt!),
+                    icon: Icons.delete_outline_rounded,
+                    background: c.danger.withValues(alpha: 0.1),
+                    foreground: c.danger,
+                  ),
                 ),
               ],
               if (days != null && days <= 30) ...[
@@ -246,6 +279,13 @@ class ContactDetail extends StatelessWidget {
         ),
       const SizedBox(height: 24),
     ];
+  }
+
+  static String _trashNote(DateTime deletedAt) {
+    final left = ContactStore.trashDays - DateTime.now().difference(deletedAt).inDays;
+    return left <= 1
+        ? 'В корзине · удалится навсегда завтра'
+        : 'В корзине · удалится навсегда через $left ${plural(left, 'день', 'дня', 'дней')}';
   }
 
   /// Ссылки, телефоны и почту из своих полей можно открыть одним кликом.

@@ -213,6 +213,7 @@ ThemeData buildTheme(Brightness brightness) {
       behavior: SnackBarBehavior.floating,
       backgroundColor: c.ink,
       contentTextStyle: TextStyle(color: c.onInk),
+      actionTextColor: c.accent,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
     ),
     textSelectionTheme: TextSelectionThemeData(

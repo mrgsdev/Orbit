@@ -22,6 +22,9 @@ class Contact {
   final DateTime createdAt;
   final DateTime updatedAt;
 
+  /// Когда контакт перенесён в корзину; null — контакт активен.
+  final DateTime? deletedAt;
+
   const Contact({
     required this.id,
     required this.name,
@@ -40,7 +43,10 @@ class Contact {
     this.favorite = false,
     required this.createdAt,
     required this.updatedAt,
+    this.deletedAt,
   });
+
+  bool get isDeleted => deletedAt != null;
 
   /// Ник без ведущего @ и без префикса ссылки t.me.
   String get telegramHandle => telegram
@@ -93,6 +99,7 @@ class Contact {
     String? Function()? photoFile,
     bool? favorite,
     DateTime? updatedAt,
+    DateTime? Function()? deletedAt,
   }) {
     return Contact(
       id: id,
@@ -112,6 +119,7 @@ class Contact {
       favorite: favorite ?? this.favorite,
       createdAt: createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
+      deletedAt: deletedAt != null ? deletedAt() : this.deletedAt,
     );
   }
 
@@ -133,6 +141,7 @@ class Contact {
         'favorite': favorite,
         'createdAt': createdAt.toIso8601String(),
         'updatedAt': updatedAt.toIso8601String(),
+        if (deletedAt != null) 'deletedAt': deletedAt!.toIso8601String(),
       };
 
   factory Contact.fromJson(Map<String, dynamic> j) {
@@ -156,6 +165,7 @@ class Contact {
       favorite: j['favorite'] as bool? ?? false,
       createdAt: date('createdAt') ?? DateTime.now(),
       updatedAt: date('updatedAt') ?? DateTime.now(),
+      deletedAt: date('deletedAt'),
     );
   }
 }

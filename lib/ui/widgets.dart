@@ -221,6 +221,21 @@ Future<bool> confirmDialog(
   return ok == true;
 }
 
+/// Мессенджер приложения: тосты, которые должны пережить закрытие панели.
+final messengerKey = GlobalKey<ScaffoldMessengerState>();
+
+/// Тост с кнопкой «Отменить» — после удаления, импорта и т. п.
+void showUndoToast(String text, {required VoidCallback onUndo}) {
+  messengerKey.currentState
+    ?..hideCurrentSnackBar()
+    ..showSnackBar(SnackBar(
+      content: Text(text),
+      width: 420,
+      duration: const Duration(seconds: 6),
+      action: SnackBarAction(label: 'Отменить', onPressed: onUndo),
+    ));
+}
+
 void showToast(BuildContext context, String text) {
   ScaffoldMessenger.of(context)
     ..hideCurrentSnackBar()

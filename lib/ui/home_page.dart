@@ -2,12 +2,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../data/contact_store.dart';
+import '../data/crypto.dart';
 import '../data/csv_export.dart';
 import '../models/contact.dart';
 import 'avatar.dart';
 import 'contact_panel.dart';
 import 'contacts_grid.dart';
 import 'contacts_table.dart';
+import 'data_actions.dart';
 import 'field_editors.dart';
 import 'pagination.dart';
 import 'schema_panel.dart';
@@ -38,8 +40,10 @@ enum ViewMode {
 
 class HomePage extends StatefulWidget {
   final ContactStore store;
+  final Vault vault;
+  final VoidCallback onLock;
 
-  const HomePage({super.key, required this.store});
+  const HomePage({super.key, required this.store, required this.vault, required this.onLock});
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -76,11 +80,14 @@ class _HomePageState extends State<HomePage> {
   List<Contact> _filtered() {
     final now = DateTime.now();
     final q = _search.text.trim();
-    final list = store.contacts.where((c) {
+    final list = _source.where((c) {
       if (!_segment.test(c, now)) return false;
       if (_interests.isNotEmpty && !_interests.every(c.interests.contains)) return false;
       return q.isEmpty || c.matches(q);
     }).toList();
+
+    // Корзина уже упорядочена: сначала недавно удалённые.
+    if (_segment == Segment.trash) return list;
 
     // В разделе дней рождения важнее всего, чей праздник ближе.
     if (_segment == Segment.birthdays) {
@@ -101,6 +108,9 @@ class _HomePageState extends State<HomePage> {
     });
     return list;
   }
+
+  /// Контакты текущего раздела: корзина или активные.
+  List<Contact> get _source => _segment == Segment.trash ? store.trash : store.contacts;
 
   void _resetFilters() => setState(() {
         _segment = Segment.all;
@@ -128,17 +138,38 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  /// Из списка — в корзину, с возможностью сразу отменить.
   Future<void> _deleteSelected() async {
-    final n = _selected.length;
+    final ids = {..._selected};
+    await store.deleteMany(ids);
+    setState(_selected.clear);
+    showUndoToast(
+      'В корзине: ${ids.length} ${plural(ids.length, 'контакт', 'контакта', 'контактов')}',
+      onUndo: () => store.restore(ids),
+    );
+  }
+
+  Future<void> _restoreSelected() async {
+    final ids = {..._selected};
+    await store.restore(ids);
+    setState(_selected.clear);
+    showUndoToast(
+      'Восстановлено: ${ids.length} ${plural(ids.length, 'контакт', 'контакта', 'контактов')}',
+      onUndo: () => store.deleteMany(ids),
+    );
+  }
+
+  Future<void> _purge(Set<String> ids) async {
+    final n = ids.length;
     final ok = await confirmDialog(
       context,
-      title: 'Удалить $n ${plural(n, 'контакт', 'контакта', 'контактов')}?',
+      title: 'Удалить навсегда $n ${plural(n, 'контакт', 'контакта', 'контактов')}?',
       message: 'Контакты и их фото будут удалены без возможности восстановления.',
-      confirmLabel: 'Удалить',
+      confirmLabel: 'Удалить навсегда',
       destructive: true,
     );
     if (!ok) return;
-    await store.deleteMany({..._selected});
+    await store.purge(ids);
     setState(_selected.clear);
   }
 
@@ -157,8 +188,9 @@ class _HomePageState extends State<HomePage> {
           body: ListenableBuilder(
             listenable: store,
             builder: (context, _) {
-              // Удалённые контакты не должны оставаться в выделении.
-              _selected.removeWhere((id) => store.byId(id) == null);
+              // В выделении — только контакты текущего раздела.
+              final visible = {for (final c in _source) c.id};
+              _selected.removeWhere((id) => !visible.contains(id));
               _interests.removeWhere((i) => !store.allInterests.contains(i));
               return Row(
                 children: [
@@ -180,6 +212,11 @@ class _HomePageState extends State<HomePage> {
                       searchFocus: _searchFocus,
                       onExport: () => _export(store.contacts),
                       onEditFields: () => showSchemaPanel(context, store: store),
+                      onImport: () => importContacts(context, store),
+                      onBackup: () => createBackup(context, store, widget.vault),
+                      onRestore: () => restoreBackup(context, store),
+                      onChangePin: () => changePin(context, store, widget.vault),
+                      onLock: widget.onLock,
                     ),
                   ),
                   Expanded(child: _main()),
@@ -229,7 +266,7 @@ class _HomePageState extends State<HomePage> {
                       duration: const Duration(milliseconds: 220),
                       curve: Curves.easeOutCubic,
                       alignment: Alignment.topCenter,
-                      child: _showStats
+                      child: _showStats && _segment != Segment.trash
                           ? Padding(
                               padding: const EdgeInsets.only(top: 20),
                               child: _StatsRow(store: store),
@@ -258,7 +295,23 @@ class _HomePageState extends State<HomePage> {
           Text(_segment.label, style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w700)),
           const SizedBox(width: 10),
           Tag('$shown', fontSize: 13),
+          if (_segment == Segment.trash) ...[
+            const SizedBox(width: 14),
+            Text(
+              'Удаляются навсегда через ${ContactStore.trashDays} дней',
+              style: TextStyle(fontSize: 13, color: c.textMuted),
+            ),
+          ],
           const Spacer(),
+          if (_segment == Segment.trash && store.trash.isNotEmpty) ...[
+            AppButton(
+              label: 'Очистить корзину',
+              icon: Icons.delete_forever_outlined,
+              danger: true,
+              onPressed: () => _purge({for (final x in store.trash) x.id}),
+            ),
+            const SizedBox(width: 12),
+          ],
           if (favorites.isNotEmpty) ...[
             Tooltip(
               message: 'Избранные',
@@ -412,9 +465,15 @@ class _HomePageState extends State<HomePage> {
           ),
         ),
         const Spacer(),
-        AppButton(
-          label: 'Экспорт',
+        SquareIconButton(
+          icon: Icons.file_upload_outlined,
+          tooltip: 'Импорт из CSV или vCard',
+          onPressed: () => importContacts(context, store),
+        ),
+        const SizedBox(width: 8),
+        SquareIconButton(
           icon: Icons.file_download_outlined,
+          tooltip: 'Экспорт в CSV',
           onPressed: () => _export(filtered),
         ),
         const SizedBox(width: 10),
@@ -463,13 +522,32 @@ class _HomePageState extends State<HomePage> {
   Widget _listCard(List<Contact> filtered, List<Contact> pageItems, int page, int pageCount) {
     final c = context.colors;
     final Widget body;
-    if (store.contacts.isEmpty) {
+    if (_segment == Segment.trash && filtered.isEmpty && _search.text.trim().isEmpty) {
+      body = _EmptyState(
+        icon: Icons.delete_outline_rounded,
+        title: 'Корзина пуста',
+        subtitle: 'Удалённые контакты хранятся здесь ${ContactStore.trashDays} дней — '
+            'их можно восстановить',
+        action: AppButton(label: 'К контактам', onPressed: () => setState(() => _segment = Segment.all)),
+      );
+    } else if (store.contacts.isEmpty && _segment != Segment.trash) {
       body = _EmptyState(
         icon: Icons.contacts_outlined,
         showLogo: true,
         title: 'Контактов пока нет',
         subtitle: 'Добавьте первого человека — имя, телефон, Telegram и где познакомились',
-        action: AppButton(label: 'Новый контакт', icon: Icons.add_rounded, primary: true, onPressed: _create),
+        action: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            AppButton(
+              label: 'Импорт',
+              icon: Icons.file_upload_outlined,
+              onPressed: () => importContacts(context, store),
+            ),
+            const SizedBox(width: 10),
+            AppButton(label: 'Новый контакт', icon: Icons.add_rounded, primary: true, onPressed: _create),
+          ],
+        ),
       );
     } else if (filtered.isEmpty) {
       body = _EmptyState(
@@ -488,6 +566,7 @@ class _HomePageState extends State<HomePage> {
         onToggleAll: (v) => setState(() {
           final ids = pageItems.map((x) => x.id);
           v ? _selected.addAll(ids) : _selected.removeAll(ids);
+          if (v) messengerKey.currentState?.hideCurrentSnackBar();
         }),
         onAddColumn: () => showFieldDialog(context, store: store, showInTable: true),
         onEditColumn: (f) => showFieldDialog(context, store: store, field: f),
@@ -551,10 +630,13 @@ class _HomePageState extends State<HomePage> {
 
   void _toggle(String id) => setState(() {
         _selected.contains(id) ? _selected.remove(id) : _selected.add(id);
+        // Панель действий с выделенным встаёт на место тоста.
+        if (_selected.isNotEmpty) messengerKey.currentState?.hideCurrentSnackBar();
       });
 
   Widget _bulkBar() {
     final c = context.colors;
+    if (_segment == Segment.trash) return _trashBar();
     final selected = store.contacts.where((x) => _selected.contains(x.id)).toList();
     final allFavorite = selected.every((x) => x.favorite);
     return Container(
@@ -593,6 +675,50 @@ class _HomePageState extends State<HomePage> {
             icon: Icons.delete_outline_rounded,
             danger: true,
             onPressed: _deleteSelected,
+          ),
+          const SizedBox(width: 4),
+          IconButton(
+            tooltip: 'Снять выделение',
+            icon: Icon(Icons.close, size: 18, color: c.textMuted),
+            onPressed: () => setState(_selected.clear),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _trashBar() {
+    final c = context.colors;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+      decoration: cardDecoration(c).copyWith(
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.12),
+            blurRadius: 24,
+            offset: const Offset(0, 8),
+          ),
+        ],
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text('${_selected.length}', style: const TextStyle(fontWeight: FontWeight.w700)),
+          const SizedBox(width: 5),
+          Text(plural(_selected.length, 'выбран', 'выбрано', 'выбрано'),
+              style: TextStyle(color: c.textMuted)),
+          const SizedBox(width: 14),
+          AppButton(
+            label: 'Восстановить',
+            icon: Icons.restore_rounded,
+            onPressed: _restoreSelected,
+          ),
+          const SizedBox(width: 8),
+          AppButton(
+            label: 'Удалить навсегда',
+            icon: Icons.delete_forever_outlined,
+            danger: true,
+            onPressed: () => _purge({..._selected}),
           ),
           const SizedBox(width: 4),
           IconButton(

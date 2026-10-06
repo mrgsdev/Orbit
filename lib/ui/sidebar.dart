@@ -9,7 +9,8 @@ enum Segment {
   all('Все контакты', Icons.people_alt_outlined),
   favorites('Избранные', Icons.star_outline_rounded),
   recent('Новые за месяц', Icons.auto_awesome_outlined),
-  birthdays('Дни рождения', Icons.cake_outlined);
+  birthdays('Дни рождения', Icons.cake_outlined),
+  trash('Корзина', Icons.delete_outline_rounded);
 
   final String label;
   final IconData icon;
@@ -20,6 +21,8 @@ enum Segment {
         Segment.favorites => c.favorite,
         Segment.recent => now.difference(c.createdAt).inDays < 30,
         Segment.birthdays => (c.daysUntilBirthday(now) ?? 999) <= 30,
+        // Корзина берёт контакты из store.trash, а не из активных.
+        Segment.trash => true,
       };
 }
 
@@ -33,6 +36,11 @@ class Sidebar extends StatefulWidget {
   final FocusNode searchFocus;
   final VoidCallback onExport;
   final VoidCallback onEditFields;
+  final VoidCallback onImport;
+  final VoidCallback onBackup;
+  final VoidCallback onRestore;
+  final VoidCallback onChangePin;
+  final VoidCallback onLock;
 
   const Sidebar({
     super.key,
@@ -45,6 +53,11 @@ class Sidebar extends StatefulWidget {
     required this.searchFocus,
     required this.onExport,
     required this.onEditFields,
+    required this.onImport,
+    required this.onBackup,
+    required this.onRestore,
+    required this.onChangePin,
+    required this.onLock,
   });
 
   @override
@@ -85,7 +98,7 @@ class _SidebarState extends State<Sidebar> {
               padding: const EdgeInsets.fromLTRB(12, 20, 12, 12),
               children: [
                 const SectionLabel('Меню', padding: EdgeInsets.fromLTRB(12, 0, 0, 8)),
-                for (final s in Segment.values)
+                for (final s in Segment.values.where((s) => s != Segment.trash))
                   _NavItem(
                     icon: s.icon,
                     label: s.label,
@@ -103,6 +116,45 @@ class _SidebarState extends State<Sidebar> {
                   count: widget.store.allFields.length,
                   selected: false,
                   onTap: widget.onEditFields,
+                ),
+                const SizedBox(height: 12),
+                Divider(color: c.border, indent: 8, endIndent: 8),
+                const SizedBox(height: 12),
+                const SectionLabel('Данные', padding: EdgeInsets.fromLTRB(12, 0, 0, 8)),
+                _NavItem(
+                  icon: Segment.trash.icon,
+                  label: Segment.trash.label,
+                  count: widget.store.trash.length,
+                  selected: widget.segment == Segment.trash,
+                  onTap: () => widget.onSegment(Segment.trash),
+                ),
+                _NavItem(
+                  icon: Icons.file_upload_outlined,
+                  label: 'Импорт контактов',
+                  count: 0,
+                  selected: false,
+                  onTap: widget.onImport,
+                ),
+                _NavItem(
+                  icon: Icons.enhanced_encryption_outlined,
+                  label: 'Резервная копия',
+                  count: 0,
+                  selected: false,
+                  onTap: widget.onBackup,
+                ),
+                _NavItem(
+                  icon: Icons.settings_backup_restore_rounded,
+                  label: 'Восстановить из копии',
+                  count: 0,
+                  selected: false,
+                  onTap: widget.onRestore,
+                ),
+                _NavItem(
+                  icon: Icons.password_rounded,
+                  label: 'Сменить PIN-код',
+                  count: 0,
+                  selected: false,
+                  onTap: widget.onChangePin,
                 ),
                 const SizedBox(height: 12),
                 Divider(color: c.border, indent: 8, endIndent: 8),
@@ -197,6 +249,11 @@ class _SidebarState extends State<Sidebar> {
                 ),
               ],
             ),
+          ),
+          IconButton(
+            tooltip: 'Заблокировать',
+            icon: Icon(Icons.lock_outline_rounded, size: 19, color: c.textMuted),
+            onPressed: widget.onLock,
           ),
         ],
       ),

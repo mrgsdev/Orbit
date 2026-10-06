@@ -41,6 +41,8 @@ dependencies:
   uuid: ^4.6.0
   url_launcher: ^6.3.3
   intl: ^0.20.2
+  cryptography: ^2.9.0
+  cryptography_flutter: ^2.3.4
 
 dev_dependencies:
   flutter_test:

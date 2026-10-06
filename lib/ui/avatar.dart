@@ -1,12 +1,50 @@
-import 'dart:io';
+import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import '../data/contact_store.dart';
+import '../models/contact.dart';
 import 'theme.dart';
+
+extension StorePhotos on ContactStore {
+  ImageProvider? photoOf(Contact c) => photoFile(c.photoFile);
+
+  ImageProvider? photoFile(String? name) => hasPhoto(name) ? EncryptedPhoto(this, name!) : null;
+}
+
+/// Фото из хранилища: файл на диске зашифрован, расшифровываем при загрузке.
+class EncryptedPhoto extends ImageProvider<EncryptedPhoto> {
+  final ContactStore store;
+  final String name;
+
+  const EncryptedPhoto(this.store, this.name);
+
+  @override
+  Future<EncryptedPhoto> obtainKey(ImageConfiguration configuration) =>
+      SynchronousFuture(this);
+
+  @override
+  ImageStreamCompleter loadImage(EncryptedPhoto key, ImageDecoderCallback decode) =>
+      MultiFrameImageStreamCompleter(codec: _load(decode), scale: 1, debugLabel: name);
+
+  Future<ui.Codec> _load(ImageDecoderCallback decode) async {
+    final bytes = await store.readPhoto(name);
+    if (bytes == null) throw StateError('Фото $name не найдено');
+    return decode(await ui.ImmutableBuffer.fromUint8List(bytes));
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is EncryptedPhoto && other.name == name && identical(other.store, store);
+
+  @override
+  int get hashCode => Object.hash(name, store);
+}
 
 class ContactAvatar extends StatelessWidget {
   final String name;
-  final File? photo;
+  final ImageProvider? photo;
   final double radius;
 
   /// Обводка цветом поверхности — для аватаров, наложенных друг на друга.
@@ -25,16 +63,16 @@ class ContactAvatar extends StatelessWidget {
     final c = context.colors;
     final photo = this.photo;
     final Widget avatar;
-    if (photo != null && photo.existsSync()) {
+    if (photo != null) {
       avatar = CircleAvatar(
         radius: radius,
         backgroundColor: c.surfaceMuted,
-        // Ключ по пути: после замены фото картинка не берётся из кэша.
-        key: ValueKey(photo.path),
+        // Ключ по фото: после замены картинка не берётся из кэша.
+        key: ValueKey(photo),
         // Декодируем с запасом по ширине: у ResizeImage нет режима cover,
         // а так альбомные фото до 2:1 не мылятся при обрезке в круг.
         backgroundImage: ResizeImage(
-          FileImage(photo),
+          photo,
           width: (radius * 4 * MediaQuery.devicePixelRatioOf(context)).round(),
           policy: ResizeImagePolicy.fit,
         ),

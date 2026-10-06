@@ -94,16 +94,30 @@ class _ContactPanelState extends State<_ContactPanel> {
     });
   }
 
+  /// В корзину — без вопросов, зато с «Отменить» в тосте.
   Future<void> _delete() async {
+    final c = _contact;
+    await store.delete(c);
+    showUndoToast('«${c.name}» в корзине', onUndo: () => store.restore({c.id}));
+    _close();
+  }
+
+  Future<void> _restore() async {
+    final c = _contact;
+    await store.restore({c.id});
+    if (mounted) showToast(context, '«${c.name}» восстановлен');
+  }
+
+  Future<void> _purge() async {
     final ok = await confirmDialog(
       context,
-      title: 'Удалить «${_contact.name}»?',
+      title: 'Удалить «${_contact.name}» навсегда?',
       message: 'Контакт и его фото будут удалены без возможности восстановления.',
-      confirmLabel: 'Удалить',
+      confirmLabel: 'Удалить навсегда',
       destructive: true,
     );
     if (!ok) return;
-    await store.delete(_contact);
+    await store.purge({_contact.id});
     _close();
   }
 
@@ -147,6 +161,8 @@ class _ContactPanelState extends State<_ContactPanel> {
                     _editing = true;
                   }),
                   onDelete: _delete,
+                  onRestore: _restore,
+                  onPurge: _purge,
                   onClose: () => Navigator.of(context).maybePop(),
                 );
               },
