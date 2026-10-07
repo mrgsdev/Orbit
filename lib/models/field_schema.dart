@@ -1,20 +1,22 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:intl/intl.dart';
+import '../l10n/strings.dart';
 
 enum FieldType {
-  text('Текст', 'text'),
-  multiline('Длинный текст', 'notes'),
-  number('Число', 'number'),
-  phone('Телефон', 'phone'),
-  email('Email', 'email'),
-  url('Ссылка', 'link'),
-  date('Дата', 'date'),
-  select('Список', 'list'),
-  checkbox('Да / нет', 'check');
+  text('text'),
+  multiline('notes'),
+  number('number'),
+  phone('phone'),
+  email('email'),
+  url('link'),
+  date('date'),
+  select('list'),
+  checkbox('check');
 
-  final String label;
   final String defaultIcon;
-  const FieldType(this.label, this.defaultIcon);
+  const FieldType(this.defaultIcon);
+
+  String get label => tr.fieldTypeLabel(this);
 
   /// Значение вводится в обычное текстовое поле.
   bool get isTextual => switch (this) {
@@ -26,47 +28,47 @@ enum FieldType {
 /// Иконки, из которых пользователь выбирает. Хранится ключ, а не codepoint:
 /// константные IconData нужны, чтобы сборка не тянула весь шрифт иконок.
 const fieldIcons = <String, IconData>{
-  'text': Icons.short_text_rounded,
-  'notes': Icons.notes_rounded,
-  'number': Icons.tag_rounded,
-  'phone': Icons.phone_outlined,
-  'email': Icons.mail_outline_rounded,
-  'link': Icons.link_rounded,
-  'date': Icons.event_outlined,
-  'list': Icons.list_alt_rounded,
-  'check': Icons.check_box_outlined,
-  'person': Icons.person_outline_rounded,
-  'group': Icons.people_alt_outlined,
-  'home': Icons.home_outlined,
-  'place': Icons.place_outlined,
-  'work': Icons.work_outline_rounded,
-  'business': Icons.business_outlined,
-  'school': Icons.school_outlined,
-  'handshake': Icons.handshake_outlined,
-  'cake': Icons.cake_outlined,
-  'gift': Icons.card_giftcard_rounded,
-  'heart': Icons.favorite_border_rounded,
-  'star': Icons.star_outline_rounded,
-  'chat': Icons.chat_bubble_outline_rounded,
-  'send': Icons.send_outlined,
-  'language': Icons.language_rounded,
-  'code': Icons.code_rounded,
-  'idea': Icons.lightbulb_outline_rounded,
-  'money': Icons.payments_outlined,
-  'flight': Icons.flight_outlined,
-  'car': Icons.directions_car_outlined,
-  'pet': Icons.pets_rounded,
-  'music': Icons.music_note_outlined,
-  'sport': Icons.sports_soccer_outlined,
-  'game': Icons.sports_esports_outlined,
-  'book': Icons.menu_book_outlined,
-  'camera': Icons.photo_camera_outlined,
-  'folder': Icons.folder_outlined,
-  'interests': Icons.interests_outlined,
-  'label': Icons.label_outline_rounded,
+  'text': CupertinoIcons.textformat,
+  'notes': CupertinoIcons.doc_text,
+  'number': CupertinoIcons.number,
+  'phone': CupertinoIcons.phone,
+  'email': CupertinoIcons.envelope,
+  'link': CupertinoIcons.link,
+  'date': CupertinoIcons.calendar,
+  'list': CupertinoIcons.list_bullet,
+  'check': CupertinoIcons.checkmark_square,
+  'person': CupertinoIcons.person,
+  'group': CupertinoIcons.person_2,
+  'home': CupertinoIcons.house,
+  'place': CupertinoIcons.location,
+  'work': CupertinoIcons.briefcase,
+  'business': CupertinoIcons.building_2_fill,
+  'school': CupertinoIcons.book,
+  'handshake': CupertinoIcons.hand_raised,
+  'cake': CupertinoIcons.gift,
+  'gift': CupertinoIcons.gift_fill,
+  'heart': CupertinoIcons.heart,
+  'star': CupertinoIcons.star,
+  'chat': CupertinoIcons.chat_bubble,
+  'send': CupertinoIcons.paperplane,
+  'language': CupertinoIcons.globe,
+  'code': CupertinoIcons.chevron_left_slash_chevron_right,
+  'idea': CupertinoIcons.lightbulb,
+  'money': CupertinoIcons.money_dollar_circle,
+  'flight': CupertinoIcons.airplane,
+  'car': CupertinoIcons.car,
+  'pet': CupertinoIcons.paw,
+  'music': CupertinoIcons.music_note,
+  'sport': CupertinoIcons.sportscourt,
+  'game': CupertinoIcons.gamecontroller,
+  'book': CupertinoIcons.book,
+  'camera': CupertinoIcons.camera,
+  'folder': CupertinoIcons.folder,
+  'interests': CupertinoIcons.sparkles,
+  'label': CupertinoIcons.tag,
 };
 
-IconData iconFor(String key) => fieldIcons[key] ?? Icons.short_text_rounded;
+IconData iconFor(String key) => fieldIcons[key] ?? CupertinoIcons.textformat;
 
 class CustomField {
   final String id;
@@ -125,9 +127,9 @@ class CustomField {
   String? format(Object? value) {
     if (value == null || value == '') return null;
     return switch (type) {
-      FieldType.checkbox => value == true ? 'Да' : 'Нет',
+      FieldType.checkbox => value == true ? tr.yes : tr.no,
       FieldType.date => switch (DateTime.tryParse('$value')) {
-          final d? => DateFormat('d MMMM y', 'ru').format(d),
+          final d? => DateFormat('d MMMM y', tr.locale).format(d),
           null => '$value',
         },
       _ => '$value',
@@ -198,11 +200,12 @@ abstract final class BuiltIn {
     FieldSection(id: notes, title: 'Заметки', icon: 'notes', builtIn: true),
   ];
 
+  /// Встроенные поля: ключ подписи (см. `Strings.builtInFieldLabel`) и иконка.
   static const fixedFields = <String, List<(String, String)>>{
-    main: [('Имя', 'person'), ('Телефон', 'phone'), ('Telegram', 'send'), ('Email', 'email')],
-    work: [('Должность', 'work'), ('Компания', 'business')],
-    meet: [('Где познакомились', 'handshake'), ('Дата знакомства', 'date'), ('День рождения', 'cake')],
-    interests: [('Интересы', 'interests')],
-    notes: [('Заметки', 'notes')],
+    main: [('name', 'person'), ('phones', 'phone'), ('telegram', 'send'), ('instagram', 'camera'), ('emails', 'email')],
+    work: [('position', 'work'), ('company', 'business')],
+    meet: [('whereMet', 'handshake'), ('metDate', 'date'), ('birthday', 'cake')],
+    interests: [('interests', 'interests')],
+    notes: [('notes', 'notes')],
   };
 }

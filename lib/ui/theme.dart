@@ -1,224 +1,238 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/widgets.dart';
 
-/// Палитра приложения: нейтральные поверхности, чёрный для главной кнопки
-/// и оранжевый акцент для выделения.
-@immutable
-class AppColors extends ThemeExtension<AppColors> {
+/// Набор цветов одной темы.
+class Palette {
+  final Brightness brightness;
+
   final Color canvas;
-  final Color surface;
-  final Color surfaceMuted;
+  final Color rail;
+  final Color railActive;
+  final Color railActiveIcon;
+  final Color card;
+  final Color cardBorder;
+  final Color gridCard;
+  final Color raised;
+  final Color hover;
   final Color border;
-  final Color text;
-  final Color textMuted;
-  final Color accent;
-  final Color accentSoft;
-  final Color ink;
-  final Color onInk;
-  final Color success;
-  final Color successSoft;
-  final Color danger;
-  final Color star;
+  final Color borderHover;
+  final Color divider;
+  final Color searchFill;
+  final Color selectedRow;
 
-  const AppColors({
+  final Color text;
+  final Color muted;
+  final Color dim;
+
+  /// Цвет действий: кнопки, выбор, фокус.
+  final Color accent;
+  final Color accentHover;
+
+  /// Текст и иконки поверх [accent] и ярких карточек.
+  final Color onAccent;
+
+  /// Акцент для текста и тонких иконок: на белом жёлтый не читается.
+  final Color accentText;
+
+  final Color red;
+  final Color dangerFill;
+  final Color dangerHover;
+
+  final Color tooltip;
+  final Color popover;
+  final Color toast;
+  final Color spotlight;
+  final Color thumb;
+  final Color scrim;
+  final Color shadow;
+
+  const Palette({
+    required this.brightness,
     required this.canvas,
-    required this.surface,
-    required this.surfaceMuted,
+    required this.rail,
+    required this.railActive,
+    required this.railActiveIcon,
+    required this.card,
+    required this.cardBorder,
+    required this.gridCard,
+    required this.raised,
+    required this.hover,
     required this.border,
+    required this.borderHover,
+    required this.divider,
+    required this.searchFill,
+    required this.selectedRow,
     required this.text,
-    required this.textMuted,
+    required this.muted,
+    required this.dim,
     required this.accent,
-    required this.accentSoft,
-    required this.ink,
-    required this.onInk,
-    required this.success,
-    required this.successSoft,
-    required this.danger,
-    required this.star,
+    required this.accentHover,
+    required this.onAccent,
+    required this.accentText,
+    required this.red,
+    required this.dangerFill,
+    required this.dangerHover,
+    required this.tooltip,
+    required this.popover,
+    required this.toast,
+    required this.spotlight,
+    required this.thumb,
+    required this.scrim,
+    required this.shadow,
   });
 
-  static const light = AppColors(
-    canvas: Color(0xFFF2F2F4),
-    surface: Color(0xFFFFFFFF),
-    surfaceMuted: Color(0xFFF7F7F8),
-    border: Color(0xFFE8E8EC),
-    text: Color(0xFF18181B),
-    textMuted: Color(0xFF7C7C86),
-    accent: Color(0xFFF25C2A),
-    accentSoft: Color(0xFFFFF3EE),
-    ink: Color(0xFF18181B),
-    onInk: Color(0xFFFFFFFF),
-    success: Color(0xFF1F9D55),
-    successSoft: Color(0xFFE7F8EE),
-    danger: Color(0xFFE5484D),
-    star: Color(0xFFF5A524),
+  /// Тёмная: почти чёрные карточки на графитовом фоне, жёлтый акцент
+  /// и яркие «билеты» для главных цифр.
+  static const dark = Palette(
+    brightness: Brightness.dark,
+    canvas: Color(0xFF1B1B1D),
+    rail: Color(0xFF111112),
+    railActive: Color(0xFF050505),
+    railActiveIcon: Color(0xFFFFFFFF),
+    card: Color(0xFF111113),
+    cardBorder: Color(0xFF1E1E22),
+    gridCard: Color(0xFF17171A),
+    raised: Color(0xFF1F1F22),
+    hover: Color(0xFF26262A),
+    border: Color(0xFF2B2B30),
+    borderHover: Color(0xFF3C3C42),
+    divider: Color(0xFF232327),
+    searchFill: Color(0xFF232326),
+    selectedRow: Color(0xFF1E1D17),
+    text: Color(0xFFFFFFFF),
+    muted: Color(0xFF8E8E96),
+    dim: Color(0xFF55555C),
+    accent: Color(0xFFF9D54A),
+    accentHover: Color(0xFFFFE070),
+    onAccent: Color(0xFF111113),
+    accentText: Color(0xFFF9D54A),
+    red: Color(0xFFFF5A5F),
+    dangerFill: Color(0xFF2A1618),
+    dangerHover: Color(0xFF3A1D20),
+    tooltip: Color(0xFF2C2C30),
+    popover: Color(0xFF1A1A1D),
+    toast: Color(0xFF26262A),
+    spotlight: Color(0xF2161618),
+    thumb: Color(0xFF3A3A40),
+    scrim: Color(0x99000000),
+    shadow: Color(0x80000000),
   );
 
-  static const dark = AppColors(
-    canvas: Color(0xFF0E0E10),
-    surface: Color(0xFF17171A),
-    surfaceMuted: Color(0xFF1E1E22),
-    border: Color(0xFF2A2A30),
-    text: Color(0xFFF4F4F5),
-    textMuted: Color(0xFF9A9AA4),
-    accent: Color(0xFFF46A3D),
-    accentSoft: Color(0xFF2E1D17),
-    ink: Color(0xFFF4F4F5),
-    onInk: Color(0xFF17171A),
-    success: Color(0xFF4CC38A),
-    successSoft: Color(0xFF15291F),
-    danger: Color(0xFFFF6369),
-    star: Color(0xFFF5B947),
+  /// Светлая: белые фоны и чёрный текст, а акценты — как в тёмной:
+  /// жёлтые кнопки, яркие карточки и интересы.
+  static const light = Palette(
+    brightness: Brightness.light,
+    canvas: Color(0xFFFFFFFF),
+    rail: Color(0xFFFFFFFF),
+    railActive: Color(0xFF111113),
+    railActiveIcon: Color(0xFFFFFFFF),
+    card: Color(0xFFFFFFFF),
+    cardBorder: Color(0xFFE6E6E6),
+    gridCard: Color(0xFFFFFFFF),
+    raised: Color(0xFFF4F4F4),
+    hover: Color(0xFFEDEDED),
+    border: Color(0xFFE0E0E0),
+    borderHover: Color(0xFFBDBDBD),
+    divider: Color(0xFFEEEEEE),
+    searchFill: Color(0xFFF4F4F4),
+    selectedRow: Color(0xFFFFF8DC),
+    text: Color(0xFF000000),
+    muted: Color(0xFF6B6B6B),
+    dim: Color(0xFFA6A6A6),
+    accent: Color(0xFFF9D54A),
+    accentHover: Color(0xFFFFE070),
+    onAccent: Color(0xFF111113),
+    accentText: Color(0xFFB08500),
+    red: Color(0xFFD93025),
+    dangerFill: Color(0xFFFDEEEE),
+    dangerHover: Color(0xFFFADADA),
+    tooltip: Color(0xFF2C2C30),
+    popover: Color(0xFFFFFFFF),
+    toast: Color(0xFFFFFFFF),
+    spotlight: Color(0xF7FFFFFF),
+    thumb: Color(0xFFC4C4C4),
+    scrim: Color(0x40000000),
+    shadow: Color(0x24000000),
   );
-
-  @override
-  AppColors copyWith() => this;
-
-  @override
-  AppColors lerp(AppColors? other, double t) =>
-      other == null || t < 0.5 ? this : other;
 }
 
-extension AppColorsX on BuildContext {
-  AppColors get colors => Theme.of(this).extension<AppColors>()!;
+/// Цвета текущей темы. Меняются вместе с темой, поэтому это геттеры,
+/// а не константы.
+abstract final class Pal {
+  static Palette current = Palette.dark;
+
+  static bool get isDark => current.brightness == Brightness.dark;
+
+  static Color get canvas => current.canvas;
+  static Color get rail => current.rail;
+  static Color get railActive => current.railActive;
+  static Color get railActiveIcon => current.railActiveIcon;
+  static Color get card => current.card;
+  static Color get cardBorder => current.cardBorder;
+  static Color get gridCard => current.gridCard;
+  static Color get raised => current.raised;
+  static Color get hover => current.hover;
+  static Color get border => current.border;
+  static Color get borderHover => current.borderHover;
+  static Color get divider => current.divider;
+  static Color get searchFill => current.searchFill;
+  static Color get selectedRow => current.selectedRow;
+
+  static Color get text => current.text;
+  static Color get muted => current.muted;
+  static Color get dim => current.dim;
+
+  static Color get accent => current.accent;
+  static Color get accentHover => current.accentHover;
+  static Color get onAccent => current.onAccent;
+  static Color get accentText => current.accentText;
+
+  static Color get red => current.red;
+  static Color get dangerFill => current.dangerFill;
+  static Color get dangerHover => current.dangerHover;
+
+  static Color get tooltip => current.tooltip;
+
+  /// Подсказка тёмная в обеих темах, текст на ней белый.
+  static Color get tooltipText => const Color(0xFFFFFFFF);
+  static Color get popover => current.popover;
+  static Color get toast => current.toast;
+  static Color get spotlight => current.spotlight;
+  static Color get thumb => current.thumb;
+  static Color get scrim => current.scrim;
+  static Color get shadow => current.shadow;
+
+  // Яркие цвета тёмной темы: карточки, интересы, монограммы.
+  static const yellow = Color(0xFFF9D54A);
+  static const teal = Color(0xFF1FE5C4);
+  static const pink = Color(0xFFF08CF4);
+  static const purple = Color(0xFF7D6BF5);
+  static const orange = Color(0xFFFF8A3D);
+  static const green = Color(0xFF3FD97F);
+  static const blue = Color(0xFF5B8CFF);
 }
 
-/// Стабильный цвет тега по его тексту: один интерес везде одного цвета.
-class TagColors {
-  static const _hues = [
-    Color(0xFF4F5BD5),
-    Color(0xFFE2541B),
-    Color(0xFF1F9D55),
-    Color(0xFF7C4DDB),
-    Color(0xFFD6336C),
-    Color(0xFFB7791F),
-    Color(0xFF0F8A8A),
-    Color(0xFF2B7BD6),
-  ];
-
-  static Color hue(String key) =>
-      _hues[key.codeUnits.fold(0, (a, b) => a * 31 + b) % _hues.length];
-
-  static (Color bg, Color fg) of(String key, Brightness brightness) {
-    final h = hue(key);
-    return brightness == Brightness.light
-        ? (Color.alphaBlend(h.withValues(alpha: 0.10), Colors.white), h)
-        : (h.withValues(alpha: 0.20), Color.lerp(h, Colors.white, 0.4)!);
-  }
+abstract final class Fonts {
+  static const sans = 'Montserrat';
+  static const script = 'MarckScript';
 }
 
-ThemeData buildTheme(Brightness brightness) {
-  final c = brightness == Brightness.light ? AppColors.light : AppColors.dark;
-  final scheme = ColorScheme.fromSeed(
-    seedColor: c.accent,
-    brightness: brightness,
-  ).copyWith(
-    primary: c.accent,
-    onPrimary: Colors.white,
-    surface: c.surface,
-    onSurface: c.text,
-    onSurfaceVariant: c.textMuted,
-    outline: c.border,
-    outlineVariant: c.border,
-    error: c.danger,
-    surfaceContainerHighest: c.surfaceMuted,
-  );
+/// Типографика на Montserrat. Геттеры — цвет текста зависит от темы.
+abstract final class T {
+  static TextStyle get _base => TextStyle(fontFamily: Fonts.sans, color: Pal.text, height: 1.3, letterSpacing: 0);
 
-  final fieldBorder = OutlineInputBorder(
-    borderRadius: BorderRadius.circular(10),
-    borderSide: BorderSide(color: c.border),
-  );
-  final menuShape = WidgetStatePropertyAll(RoundedRectangleBorder(
-    borderRadius: BorderRadius.circular(12),
-    side: BorderSide(color: c.border),
-  ));
+  static TextStyle get display => _base.copyWith(fontSize: 34, fontWeight: FontWeight.w500, letterSpacing: -0.5);
+  static TextStyle get number => _base.copyWith(fontSize: 38, fontWeight: FontWeight.w700, letterSpacing: -0.5, height: 1.1);
+  static TextStyle get title => _base.copyWith(fontSize: 18, fontWeight: FontWeight.w600);
+  static TextStyle get heading => _base.copyWith(fontSize: 15, fontWeight: FontWeight.w600);
+  static TextStyle get body => _base.copyWith(fontSize: 13.5, fontWeight: FontWeight.w500);
+  static TextStyle get small => _base.copyWith(fontSize: 12, fontWeight: FontWeight.w500, color: Pal.muted);
+  static TextStyle get tiny => _base.copyWith(fontSize: 11, fontWeight: FontWeight.w500, color: Pal.muted);
+  static TextStyle get script => TextStyle(fontFamily: Fonts.script, fontSize: 30, color: Pal.text);
+}
 
-  return ThemeData(
-    colorScheme: scheme,
-    brightness: brightness,
-    scaffoldBackgroundColor: c.canvas,
-    extensions: [c],
-    splashFactory: InkSparkle.splashFactory,
-    dividerTheme: DividerThemeData(color: c.border, space: 1, thickness: 1),
-    iconTheme: IconThemeData(color: c.text, size: 20),
-    inputDecorationTheme: InputDecorationTheme(
-      filled: true,
-      fillColor: c.surface,
-      isDense: true,
-      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-      border: fieldBorder,
-      enabledBorder: fieldBorder,
-      focusedBorder: fieldBorder.copyWith(
-          borderSide: BorderSide(color: c.accent, width: 1.5)),
-      errorBorder: fieldBorder.copyWith(borderSide: BorderSide(color: c.danger)),
-      hintStyle: TextStyle(color: c.textMuted, fontSize: 14),
-      labelStyle: TextStyle(color: c.textMuted, fontSize: 14),
-      prefixIconColor: c.textMuted,
-      suffixIconColor: c.textMuted,
-    ),
-    checkboxTheme: CheckboxThemeData(
-      fillColor: WidgetStateProperty.resolveWith(
-          (s) => s.contains(WidgetState.selected) ? c.accent : Colors.transparent),
-      checkColor: const WidgetStatePropertyAll(Colors.white),
-      side: BorderSide(color: c.textMuted.withValues(alpha: 0.5), width: 1.4),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(5)),
-      visualDensity: VisualDensity.compact,
-      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-    ),
-    switchTheme: SwitchThemeData(
-      trackColor: WidgetStateProperty.resolveWith(
-          (s) => s.contains(WidgetState.selected) ? c.accent : c.border),
-      thumbColor: const WidgetStatePropertyAll(Colors.white),
-      trackOutlineColor: const WidgetStatePropertyAll(Colors.transparent),
-      thumbIcon: const WidgetStatePropertyAll(null),
-    ),
-    menuTheme: MenuThemeData(
-      style: MenuStyle(
-        backgroundColor: WidgetStatePropertyAll(c.surface),
-        surfaceTintColor: const WidgetStatePropertyAll(Colors.transparent),
-        shape: menuShape,
-        elevation: const WidgetStatePropertyAll(8),
-        shadowColor: WidgetStatePropertyAll(Colors.black.withValues(alpha: 0.25)),
-        padding: const WidgetStatePropertyAll(EdgeInsets.all(6)),
-      ),
-    ),
-    menuButtonTheme: MenuButtonThemeData(
-      style: ButtonStyle(
-        shape: WidgetStatePropertyAll(
-            RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
-        minimumSize: const WidgetStatePropertyAll(Size(200, 38)),
-        textStyle: const WidgetStatePropertyAll(TextStyle(fontSize: 14)),
-        foregroundColor: WidgetStatePropertyAll(c.text),
-        iconColor: WidgetStatePropertyAll(c.textMuted),
-      ),
-    ),
-    dialogTheme: DialogThemeData(
-      backgroundColor: c.surface,
-      surfaceTintColor: Colors.transparent,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-    ),
-    datePickerTheme: DatePickerThemeData(
-      backgroundColor: c.surface,
-      surfaceTintColor: Colors.transparent,
-      todayForegroundColor: WidgetStatePropertyAll(c.accent),
-    ),
-    tooltipTheme: TooltipThemeData(
-      decoration: BoxDecoration(
-        color: c.ink,
-        borderRadius: BorderRadius.circular(6),
-      ),
-      textStyle: TextStyle(color: c.onInk, fontSize: 12),
-      waitDuration: const Duration(milliseconds: 400),
-    ),
-    snackBarTheme: SnackBarThemeData(
-      behavior: SnackBarBehavior.floating,
-      backgroundColor: c.ink,
-      contentTextStyle: TextStyle(color: c.onInk),
-      actionTextColor: c.accent,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-    ),
-    textSelectionTheme: TextSelectionThemeData(
-      cursorColor: c.accent,
-      selectionColor: c.accent.withValues(alpha: 0.25),
-    ),
-  );
+/// Стабильный яркий цвет по тексту — для интересов и монограмм.
+abstract final class TagColors {
+  static const _hues = [Pal.teal, Pal.yellow, Pal.pink, Pal.purple, Pal.orange, Pal.green, Pal.blue, Color(0xFFFF5A5F)];
+
+  static Color hue(String key) => _hues[key.codeUnits.fold(0, (a, b) => (a * 31 + b) & 0x3fffffff) % _hues.length];
 }

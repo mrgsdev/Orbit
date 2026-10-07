@@ -145,16 +145,31 @@ class KeyEnvelope {
   final KdfParams recoveryKdf;
   final String recoveryWrap;
 
+  /// Сам recovery code, зашифрованный ключом данных, — чтобы его можно было
+  /// показать снова после ввода PIN. У баз до этой версии его нет.
+  final String? codeBox;
+
   const KeyEnvelope({
     required this.pinKdf,
     required this.pinWrap,
     required this.recoveryKdf,
     required this.recoveryWrap,
+    this.codeBox,
   });
+
+  KeyEnvelope copyWith({KdfParams? pinKdf, String? pinWrap, KdfParams? recoveryKdf, String? recoveryWrap, String? codeBox}) =>
+      KeyEnvelope(
+        pinKdf: pinKdf ?? this.pinKdf,
+        pinWrap: pinWrap ?? this.pinWrap,
+        recoveryKdf: recoveryKdf ?? this.recoveryKdf,
+        recoveryWrap: recoveryWrap ?? this.recoveryWrap,
+        codeBox: codeBox ?? this.codeBox,
+      );
 
   Map<String, dynamic> toJson() => {
         'pin': {...pinKdf.toJson(), 'wrap': pinWrap},
         'recovery': {...recoveryKdf.toJson(), 'wrap': recoveryWrap},
+        'code': ?codeBox,
       };
 
   factory KeyEnvelope.fromJson(Map<String, dynamic> j) {
@@ -165,6 +180,7 @@ class KeyEnvelope {
       pinWrap: pin['wrap'] as String,
       recoveryKdf: KdfParams.fromJson(rec),
       recoveryWrap: rec['wrap'] as String,
+      codeBox: j['code'] as String?,
     );
   }
 
@@ -210,9 +226,46 @@ class Vault {
       pinWrap: await data._wrapWith(pinKek),
       recoveryKdf: recKdf,
       recoveryWrap: await data._wrapWith(recKek),
+      codeBox: base64.encode(await data.encrypt(utf8.encode(RecoveryCode.normalize(code)))),
     );
     await _save();
     return (data, code);
+  }
+
+  /// Можно ли показать recovery code — в базах до этой версии он не сохранён.
+  bool get canRevealCode => _envelope?.codeBox != null;
+
+  /// Recovery code по PIN. Бросает [WrongSecretException] при неверном PIN;
+  /// null — код в этой базе не сохранён.
+  Future<String?> revealRecoveryCode(String pin) async {
+    final data = await unlock(pin);
+    final box = _envelope!.codeBox;
+    if (box == null) return null;
+    return RecoveryCode.format(utf8.decode(await data.decrypt(base64.decode(box))));
+  }
+
+  /// Запоминает введённый пользователем код (вход по коду в старой базе),
+  /// чтобы потом его можно было показать.
+  Future<void> rememberRecoveryCode(DataCipher data, String code) async {
+    if (_envelope!.codeBox != null) return;
+    _envelope = _envelope!.copyWith(
+      codeBox: base64.encode(await data.encrypt(utf8.encode(RecoveryCode.normalize(code)))),
+    );
+    await _save();
+  }
+
+  /// Новый recovery code для того же ключа данных. Старые резервные копии
+  /// по-прежнему открываются только старым кодом.
+  Future<String> regenerateRecoveryCode(DataCipher data) async {
+    final code = RecoveryCode.generate();
+    final kdf = KdfParams.random();
+    _envelope = _envelope!.copyWith(
+      recoveryKdf: kdf,
+      recoveryWrap: await data._wrapWith(await kdf.derive(RecoveryCode.normalize(code))),
+      codeBox: base64.encode(await data.encrypt(utf8.encode(RecoveryCode.normalize(code)))),
+    );
+    await _save();
+    return code;
   }
 
   Future<DataCipher> unlock(String pin) => _envelope!.openWithPin(pin);
@@ -222,13 +275,7 @@ class Vault {
   /// Новый PIN для того же ключа данных; recovery code не меняется.
   Future<void> changePin(DataCipher data, String newPin) async {
     final kdf = KdfParams.random();
-    final env = _envelope!;
-    _envelope = KeyEnvelope(
-      pinKdf: kdf,
-      pinWrap: await data._wrapWith(await kdf.derive(newPin)),
-      recoveryKdf: env.recoveryKdf,
-      recoveryWrap: env.recoveryWrap,
-    );
+    _envelope = _envelope!.copyWith(pinKdf: kdf, pinWrap: await data._wrapWith(await kdf.derive(newPin)));
     await _save();
   }
 

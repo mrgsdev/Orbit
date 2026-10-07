@@ -1,16 +1,23 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'package:orbit/data/crypto.dart';
 import 'package:orbit/main.dart';
+import 'package:orbit/ui/appearance.dart';
+import 'package:orbit/ui/widgets.dart';
 
 void main() {
   late Directory root;
 
-  setUpAll(() => initializeDateFormatting('ru'));
+  setUpAll(() async {
+    await initializeDateFormatting('ru');
+    // Мигающий курсор не даёт pumpAndSettle дождаться покоя.
+    EditableText.debugDeterministicCursor = true;
+  });
   setUp(() => root = Directory.systemTemp.createTempSync('orbit_flow'));
   tearDown(() => root.deleteSync(recursive: true));
 
@@ -23,6 +30,9 @@ void main() {
     await t.pumpAndSettle();
     expect(finder, findsWidgets);
   }
+
+  Finder fields() => find.byType(CupertinoTextField);
+  Finder hint(String prefix) => find.byWidgetPredicate((w) => w is Hint && w.message.startsWith(prefix));
 
   testWidgets('настройка PIN, шифрование, корзина с отменой, блокировка', (t) async {
     t.view.physicalSize = const Size(1600, 1000);
@@ -37,68 +47,78 @@ void main() {
     final vault = Vault(root);
     await t.runAsync(vault.load);
 
-    await t.pumpWidget(ContactsApp(root: root, vault: vault));
+    await t.pumpWidget(ContactsApp(root: root, vault: vault, appearance: Appearance.memory()));
     expect(find.text('Защитите базу'), findsOneWidget);
 
     // Короткий PIN не принимается.
-    await t.enterText(find.byType(TextField).at(0), '123');
-    await t.enterText(find.byType(TextField).at(1), '123');
+    await t.enterText(fields().at(0), '123');
+    await t.enterText(fields().at(1), '123');
     await t.tap(find.text('Продолжить'));
     await t.pump();
     expect(find.text('Не короче 6 символов'), findsOneWidget);
 
-    await t.enterText(find.byType(TextField).at(0), '135790');
-    await t.enterText(find.byType(TextField).at(1), '135790');
+    await t.enterText(fields().at(0), '135790');
+    await t.enterText(fields().at(1), '135790');
     await t.tap(find.text('Продолжить'));
     await waitFor(t, find.text('Сохраните recovery code'));
 
-    final code = (t.widget(find.byType(SelectableText)) as SelectableText).data!;
+    final code = (t.widget(find.byKey(const Key('recovery-code'))) as Text).data!;
     expect(RecoveryCode.looksValid(code), isTrue);
 
     // Пока не отмечено «сохранил», открыть нельзя.
     await t.tap(find.text('Открыть Orbit'));
     await t.pump();
     expect(find.text('Сохраните recovery code'), findsOneWidget);
-    await t.tap(find.byType(Checkbox));
+    await t.tap(find.byType(Check));
     await t.pump();
     await t.tap(find.text('Открыть Orbit'));
-    await waitFor(t, find.text('Анна Смирнова'));
+    await waitFor(t, find.text('Всего контактов'));
+
+    // Первый запуск — знакомство. Его можно пропустить.
+    await waitFor(t, find.text('Добро пожаловать в Orbit'));
+    await t.tap(find.text('Пропустить'));
+    await t.pumpAndSettle();
+    expect(find.text('Добро пожаловать в Orbit'), findsNothing);
 
     // Старая открытая база теперь зашифрована.
     final db = await t.runAsync(() => File('${root.path}/contacts.json').readAsBytes());
     expect(DataCipher.isEncrypted(db!), isTrue);
 
-    // Удаление уходит в корзину, «Отменить» возвращает.
-    await t.tap(find.byType(Checkbox).at(1));
+    // Список контактов; удаление уходит в корзину, «Отменить» возвращает.
+    await t.tap(hint('Контакты'));
     await t.pumpAndSettle();
-    await t.tap(find.text('Удалить'));
+    await t.tap(find.text('Анна Смирнова').first);
+    await t.pumpAndSettle();
+    await t.tap(hint('В корзину'));
     await waitFor(t, find.text('Отменить'));
     expect(find.text('Анна Смирнова'), findsNothing);
     await t.tap(find.text('Отменить'));
     await waitFor(t, find.text('Анна Смирнова'));
 
-    // Ещё раз удаляем и восстанавливаем уже из раздела «Корзина».
-    await t.tap(find.byType(Checkbox).at(1));
+    // Ещё раз удаляем — клавишей ⌫ — и восстанавливаем уже из корзины.
+    await t.tap(find.text('Анна Смирнова').first);
     await t.pumpAndSettle();
-    await t.tap(find.text('Удалить'));
+    await t.sendKeyEvent(LogicalKeyboardKey.backspace);
     await waitFor(t, find.text('Отменить'));
-    await t.tap(find.text('Корзина').first);
+    await t.tap(hint('Корзина'));
     await t.pumpAndSettle();
-    expect(find.text('Анна Смирнова'), findsOneWidget);
-    await t.tap(find.byType(Checkbox).at(1));
+    await t.tap(find.text('Анна Смирнова').first);
     await t.pumpAndSettle();
     await t.tap(find.text('Восстановить'));
     await waitFor(t, find.text('Корзина пуста'));
 
     // Блокировка и неверный PIN.
-    await t.tap(find.byTooltip('Заблокировать'));
+    await t.tap(hint('Заблокировать'));
     await t.pumpAndSettle();
     expect(find.text('Orbit заблокирован'), findsOneWidget);
-    await t.enterText(find.byType(TextField), '000000');
+    await t.enterText(fields(), '000000');
     await t.tap(find.text('Открыть'));
     await waitFor(t, find.text('Неверный PIN-код'));
-    await t.enterText(find.byType(TextField), '135790');
+    await t.enterText(fields(), '135790');
     await t.tap(find.text('Открыть'));
-    await waitFor(t, find.text('Борис Иванов'));
+    await waitFor(t, find.text('Всего контактов'));
+    // Знакомство показывается только при первом запуске.
+    await t.pumpAndSettle();
+    expect(find.text('Добро пожаловать в Orbit'), findsNothing);
   });
 }

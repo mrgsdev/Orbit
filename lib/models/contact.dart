@@ -1,9 +1,39 @@
+/// Телефон или почта с подписью: «мобильный», «рабочий»…
+class LabeledValue {
+  final String label;
+  final String value;
+
+  const LabeledValue(this.label, this.value);
+
+  static const phoneLabels = ['мобильный', 'рабочий', 'домашний', 'другой'];
+  static const emailLabels = ['личный', 'рабочий', 'другой'];
+
+  Map<String, dynamic> toJson() => {'label': label, 'value': value};
+
+  factory LabeledValue.fromJson(Map<String, dynamic> j) =>
+      LabeledValue(j['label'] as String? ?? '', j['value'] as String? ?? '');
+
+  @override
+  bool operator ==(Object other) =>
+      other is LabeledValue && other.label == label && other.value == value;
+
+  @override
+  int get hashCode => Object.hash(label, value);
+
+  @override
+  String toString() => '$label: $value';
+}
+
 class Contact {
   final String id;
   final String name;
-  final String phone;
+
+  /// Первый номер и первая почта — основные: их показывают таблица
+  /// и карточки, по ним звонят и пишут из быстрых действий.
+  final List<LabeledValue> phones;
   final String telegram;
-  final String email;
+  final String instagram;
+  final List<LabeledValue> emails;
   final String position;
   final String company;
   final String whereMet;
@@ -28,9 +58,10 @@ class Contact {
   const Contact({
     required this.id,
     required this.name,
-    this.phone = '',
+    this.phones = const [],
     this.telegram = '',
-    this.email = '',
+    this.instagram = '',
+    this.emails = const [],
     this.position = '',
     this.company = '',
     this.whereMet = '',
@@ -48,13 +79,30 @@ class Contact {
 
   bool get isDeleted => deletedAt != null;
 
-  /// Ник без ведущего @ и без префикса ссылки t.me.
+  String get phone => phones.isEmpty ? '' : phones.first.value;
+  String get email => emails.isEmpty ? '' : emails.first.value;
+
+  /// Ник без @, без адреса t.me / telegram.me / tg:// и хвоста ссылки.
   String get telegramHandle => telegram
       .trim()
-      .replaceFirst(RegExp(r'^(https?://)?(t\.me|telegram\.me)/'), '')
-      .replaceFirst('@', '');
+      .replaceFirst(RegExp(r'^tg://resolve\?domain='), '')
+      .replaceFirst(RegExp(r'^(https?://)?(www\.)?(t\.me|telegram\.me|telegram\.dog)/'), '')
+      .replaceFirst('@', '')
+      .split(RegExp(r'[/?#&]'))
+      .first;
 
-  String get telegramUrl => 'https://t.me/@$telegramHandle';
+  /// Профиль открывается по t.me/ник, как бы ник ни был записан.
+  String get telegramUrl => 'https://t.me/$telegramHandle';
+
+  /// Ник без @, без адреса профиля и хвоста ссылки (?igsh=…, /).
+  String get instagramHandle => instagram
+      .trim()
+      .replaceFirst(RegExp(r'^(https?://)?(www\.)?(instagram\.com|instagr\.am)/'), '')
+      .replaceFirst('@', '')
+      .split(RegExp(r'[/?#]'))
+      .first;
+
+  String get instagramUrl => 'https://instagram.com/$instagramHandle';
 
   /// Сколько дней до ближайшего дня рождения (0 — сегодня).
   int? daysUntilBirthday(DateTime now) {
@@ -71,9 +119,10 @@ class Contact {
     final q = query.toLowerCase();
     return [
       name,
-      phone,
+      ...phones.map((p) => p.value),
       telegram,
-      email,
+      instagram,
+      ...emails.map((e) => e.value),
       position,
       company,
       whereMet,
@@ -85,9 +134,10 @@ class Contact {
 
   Contact copyWith({
     String? name,
-    String? phone,
+    List<LabeledValue>? phones,
     String? telegram,
-    String? email,
+    String? instagram,
+    List<LabeledValue>? emails,
     String? position,
     String? company,
     String? whereMet,
@@ -104,9 +154,10 @@ class Contact {
     return Contact(
       id: id,
       name: name ?? this.name,
-      phone: phone ?? this.phone,
+      phones: phones ?? this.phones,
       telegram: telegram ?? this.telegram,
-      email: email ?? this.email,
+      instagram: instagram ?? this.instagram,
+      emails: emails ?? this.emails,
       position: position ?? this.position,
       company: company ?? this.company,
       whereMet: whereMet ?? this.whereMet,
@@ -126,9 +177,10 @@ class Contact {
   Map<String, dynamic> toJson() => {
         'id': id,
         'name': name,
-        'phone': phone,
+        'phones': phones.map((p) => p.toJson()).toList(),
         'telegram': telegram,
-        'email': email,
+        'instagram': instagram,
+        'emails': emails.map((e) => e.toJson()).toList(),
         'position': position,
         'company': company,
         'whereMet': whereMet,
@@ -147,12 +199,23 @@ class Contact {
   factory Contact.fromJson(Map<String, dynamic> j) {
     DateTime? date(String key) =>
         j[key] == null ? null : DateTime.tryParse(j[key] as String);
+    // До списков телефон и почта хранились одной строкой.
+    List<LabeledValue> values(String listKey, String legacyKey, String legacyLabel) {
+      final list = j[listKey] as List?;
+      if (list != null) {
+        return [for (final e in list) LabeledValue.fromJson(e as Map<String, dynamic>)];
+      }
+      final legacy = (j[legacyKey] as String? ?? '').trim();
+      return legacy.isEmpty ? const [] : [LabeledValue(legacyLabel, legacy)];
+    }
+
     return Contact(
       id: j['id'] as String,
       name: j['name'] as String? ?? '',
-      phone: j['phone'] as String? ?? '',
+      phones: values('phones', 'phone', LabeledValue.phoneLabels.first),
       telegram: j['telegram'] as String? ?? '',
-      email: j['email'] as String? ?? '',
+      instagram: j['instagram'] as String? ?? '',
+      emails: values('emails', 'email', LabeledValue.emailLabels.first),
       position: j['position'] as String? ?? '',
       company: j['company'] as String? ?? '',
       whereMet: j['whereMet'] as String? ?? '',

@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/services.dart';
 
 import '../data/contact_store.dart';
@@ -9,6 +9,7 @@ import '../data/crypto.dart';
 import 'home_page.dart';
 import 'theme.dart';
 import 'widgets.dart';
+import '../l10n/strings.dart';
 
 const minPinLength = 6;
 
@@ -27,6 +28,9 @@ class AppGate extends StatefulWidget {
 class _AppGateState extends State<AppGate> {
   ContactStore? _store;
 
+  /// Знакомство — один раз, сразу после первой настройки базы.
+  bool _firstRun = false;
+
   Future<void> _open(DataCipher cipher) async {
     final store = ContactStore();
     await store.load(root: widget.root, cipher: cipher);
@@ -34,7 +38,9 @@ class _AppGateState extends State<AppGate> {
   }
 
   void _lock() {
+    _firstRun = false;
     final old = _store;
+    hideToast();
     setState(() => _store = null);
     WidgetsBinding.instance.addPostFrameCallback((_) => old?.dispose());
   }
@@ -43,17 +49,24 @@ class _AppGateState extends State<AppGate> {
   Widget build(BuildContext context) {
     final store = _store;
     return AnimatedSwitcher(
-      duration: const Duration(milliseconds: 250),
+      duration: const Duration(milliseconds: 220),
       child: store != null
-          ? HomePage(key: ObjectKey(store), store: store, vault: widget.vault, onLock: _lock)
+          ? HomePage(key: ObjectKey(store), store: store, vault: widget.vault, onLock: _lock, onboarding: _firstRun)
           : widget.vault.isSetUp
               ? _UnlockView(vault: widget.vault, onUnlocked: _open)
-              : _SetupView(root: widget.root, vault: widget.vault, onDone: _open),
+              : _SetupView(
+                  root: widget.root,
+                  vault: widget.vault,
+                  onDone: (cipher) {
+                    _firstRun = true;
+                    return _open(cipher);
+                  },
+                ),
     );
   }
 }
 
-/// Общий каркас экранов блокировки: логотип и карточка по центру.
+/// Экран блокировки: тёмный фон, карточка по центру с логотипом.
 class _LockFrame extends StatelessWidget {
   final String title;
   final String subtitle;
@@ -63,31 +76,29 @@ class _LockFrame extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final c = context.colors;
-    return Scaffold(
-      body: Center(
+    return ColoredBox(
+      color: Pal.canvas,
+      child: Center(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
-          child: Container(
-            width: 420,
-            padding: const EdgeInsets.fromLTRB(32, 28, 32, 28),
-            decoration: cardDecoration(c, radius: 22),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Center(child: Image.asset('assets/images/logo.png', width: 96, height: 96)),
-                const SizedBox(height: 14),
-                Text(title,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700)),
-                const SizedBox(height: 6),
-                Text(subtitle,
-                    textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 13.5, color: c.textMuted, height: 1.45)),
-                const SizedBox(height: 22),
-                ...children,
-              ],
+          padding: const EdgeInsets.all(32),
+          child: Panel(
+            padding: const EdgeInsets.fromLTRB(36, 30, 36, 32),
+            child: SizedBox(
+              width: 360,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Center(child: Image.asset('assets/images/logo.png', width: 120, height: 120)),
+                  Center(child: Text('Orbit', style: T.script.copyWith(fontSize: 34))),
+                  const SizedBox(height: 14),
+                  Text(title, textAlign: TextAlign.center, style: T.title.copyWith(fontSize: 21)),
+                  const SizedBox(height: 8),
+                  Text(subtitle, textAlign: TextAlign.center, style: T.body.copyWith(color: Pal.muted, height: 1.45)),
+                  const SizedBox(height: 24),
+                  ...children,
+                ],
+              ),
             ),
           ),
         ),
@@ -96,10 +107,10 @@ class _LockFrame extends StatelessWidget {
   }
 }
 
-/// Поле PIN-кода с кнопкой «показать».
+/// Поле PIN-кода со значком замка и кнопкой «показать».
 class PinField extends StatefulWidget {
   final TextEditingController controller;
-  final String label;
+  final String placeholder;
   final bool autofocus;
   final String? errorText;
   final ValueChanged<String>? onSubmitted;
@@ -107,7 +118,7 @@ class PinField extends StatefulWidget {
   const PinField({
     super.key,
     required this.controller,
-    required this.label,
+    required this.placeholder,
     this.autofocus = false,
     this.errorText,
     this.onSubmitted,
@@ -121,32 +132,37 @@ class _PinFieldState extends State<PinField> {
   bool _visible = false;
 
   @override
-  Widget build(BuildContext context) {
-    return TextField(
-      controller: widget.controller,
-      autofocus: widget.autofocus,
-      obscureText: !_visible,
-      enableSuggestions: false,
-      autocorrect: false,
-      onSubmitted: widget.onSubmitted,
-      decoration: InputDecoration(
-        labelText: widget.label,
-        errorText: widget.errorText,
-        prefixIcon: const Icon(Icons.lock_outline_rounded, size: 19),
-        suffixIcon: IconButton(
-          tooltip: _visible ? 'Скрыть' : 'Показать',
-          icon: Icon(_visible ? Icons.visibility_off_outlined : Icons.visibility_outlined, size: 18),
-          onPressed: () => setState(() => _visible = !_visible),
-        ),
-      ),
-    );
-  }
+  Widget build(BuildContext context) => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Field(
+            controller: widget.controller,
+            autofocus: widget.autofocus,
+            obscure: !_visible,
+            placeholder: widget.placeholder,
+            icon: CupertinoIcons.lock,
+            error: widget.errorText != null,
+            suffix: IconBtn(
+              icon: _visible ? CupertinoIcons.eye_slash : CupertinoIcons.eye,
+              hint: _visible ? tr.hide : tr.show,
+              size: 30,
+              onPressed: () => setState(() => _visible = !_visible),
+            ),
+            onSubmitted: widget.onSubmitted,
+          ),
+          if (widget.errorText != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 6, left: 2),
+              child: Text(widget.errorText!, style: T.small.copyWith(color: Pal.red)),
+            ),
+        ],
+      );
 }
 
 /// Проверка нового PIN: длина и совпадение с подтверждением.
 String? validateNewPin(String pin, String confirm) {
-  if (pin.length < minPinLength) return 'Не короче $minPinLength символов';
-  if (pin != confirm) return 'PIN-коды не совпадают';
+  if (pin.length < minPinLength) return tr.minLength(minPinLength);
+  if (pin != confirm) return tr.pinsMismatch;
   return null;
 }
 
@@ -155,18 +171,20 @@ class _Busy extends StatelessWidget {
   const _Busy(this.label);
 
   @override
-  Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 8),
+  Widget build(BuildContext context) => SizedBox(
+        height: 42,
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const SizedBox.square(dimension: 18, child: CircularProgressIndicator(strokeWidth: 2)),
+            CupertinoActivityIndicator(color: Pal.accent, radius: 9),
             const SizedBox(width: 12),
-            Text(label, style: TextStyle(color: context.colors.textMuted)),
+            Text(label, style: T.body.copyWith(color: Pal.muted)),
           ],
         ),
       );
 }
+
+Widget _primary(String label, VoidCallback? onPressed) => Btn.primary(label: label, expand: true, onPressed: onPressed);
 
 class _SetupView extends StatefulWidget {
   final Directory root;
@@ -220,63 +238,43 @@ class _SetupViewState extends State<_SetupView> {
     final code = _code;
     if (code != null) {
       return _LockFrame(
-        title: 'Сохраните recovery code',
-        subtitle: 'Он нужен, если вы забудете PIN, и чтобы восстановить резервную '
-            'копию на другом Mac. Код показывается только сейчас — запишите его '
-            'или сохраните в менеджер паролей.',
+        title: tr.saveRecoveryTitle,
+        subtitle: tr.saveRecoverySubtitle,
         children: [
           RecoveryCodeBox(code: code),
           const SizedBox(height: 16),
-          GestureDetector(
+          Pressable(
             onTap: () => setState(() => _saved = !_saved),
-            child: Row(
+            pressScale: 1,
+            builder: (context, _, _) => Row(
               children: [
-                Checkbox(value: _saved, onChanged: (v) => setState(() => _saved = v ?? false)),
-                const SizedBox(width: 8),
-                const Expanded(
-                  child: Text('Я сохранил код в надёжном месте', style: TextStyle(fontSize: 14)),
-                ),
+                Check(value: _saved, onChanged: () => setState(() => _saved = !_saved)),
+                const SizedBox(width: 6),
+                Expanded(child: Text(tr.savedCodeCheck, style: T.body)),
               ],
             ),
           ),
-          const SizedBox(height: 12),
-          if (_busy)
-            const _Busy('Шифруем базу…')
-          else
-            AppButton(
-              label: 'Открыть Orbit',
-              primary: true,
-              onPressed: _saved ? _finish : null,
-            ),
+          const SizedBox(height: 18),
+          if (_busy) _Busy(tr.encrypting) else _primary(tr.openOrbit, _saved ? _finish : null),
         ],
       );
     }
     return _LockFrame(
-      title: 'Защитите базу',
+      title: tr.protectTitle,
       subtitle: _hasData
-          ? 'Придумайте PIN-код или пароль. Все контакты и фото будут храниться '
-              'на диске в зашифрованном виде.'
-          : 'Придумайте PIN-код или пароль. Контакты и фото будут храниться '
-              'на диске в зашифрованном виде.',
+          ? tr.protectExisting
+          : tr.protectNew,
       children: [
-        PinField(controller: _pin, label: 'PIN-код или пароль', autofocus: true),
-        const SizedBox(height: 12),
-        PinField(
-          controller: _confirm,
-          label: 'Повторите',
-          errorText: _error,
-          onSubmitted: (_) => _create(),
-        ),
+        PinField(controller: _pin, placeholder: tr.pinOrPassword, autofocus: true),
+        const SizedBox(height: 10),
+        PinField(controller: _confirm, placeholder: tr.repeat, errorText: _error, onSubmitted: (_) => _create()),
         const SizedBox(height: 8),
         Text(
-          'Не короче $minPinLength символов. Длинный пароль надёжнее короткого числового PIN.',
-          style: TextStyle(fontSize: 12.5, color: context.colors.textMuted, height: 1.4),
+          tr.pinHint(minPinLength),
+          style: T.small.copyWith(height: 1.45),
         ),
         const SizedBox(height: 18),
-        if (_busy)
-          const _Busy('Создаём ключи…')
-        else
-          AppButton(label: 'Продолжить', primary: true, onPressed: _create),
+        if (_busy) _Busy(tr.creatingKeys) else _primary(tr.continueAction, _create),
       ],
     );
   }
@@ -288,42 +286,34 @@ class RecoveryCodeBox extends StatelessWidget {
   const RecoveryCodeBox({super.key, required this.code});
 
   @override
-  Widget build(BuildContext context) {
-    final c = context.colors;
-    return Container(
-      padding: const EdgeInsets.fromLTRB(16, 14, 8, 14),
-      decoration: BoxDecoration(
-        color: c.accentSoft,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: c.accent.withValues(alpha: 0.4)),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: SelectableText(
-              code,
-              style: TextStyle(
-                fontFamily: 'Menlo',
-                fontSize: 16,
-                fontWeight: FontWeight.w600,
-                letterSpacing: 0.5,
-                color: c.text,
-                height: 1.5,
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.fromLTRB(16, 14, 8, 14),
+        decoration: BoxDecoration(
+          color: Pal.accent.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: Pal.accent.withValues(alpha: 0.5)),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                code,
+                key: const Key('recovery-code'),
+                style: T.body.copyWith(fontFamily: 'Menlo', fontSize: 15, fontWeight: FontWeight.w600, height: 1.5, color: Pal.accentText),
               ),
             ),
-          ),
-          IconButton(
-            tooltip: 'Скопировать',
-            icon: Icon(Icons.copy_rounded, size: 18, color: c.accent),
-            onPressed: () {
-              Clipboard.setData(ClipboardData(text: code));
-              showToast(context, 'Recovery code скопирован');
-            },
-          ),
-        ],
-      ),
-    );
-  }
+            IconBtn(
+              icon: CupertinoIcons.doc_on_doc,
+              hint: tr.copy,
+              color: Pal.accentText,
+              onPressed: () {
+                Clipboard.setData(ClipboardData(text: code));
+                showToast(tr.codeCopied);
+              },
+            ),
+          ],
+        ),
+      );
 }
 
 class _UnlockView extends StatefulWidget {
@@ -395,7 +385,7 @@ class _UnlockViewState extends State<_UnlockView> {
       _pin.clear();
       setState(() {
         _busy = false;
-        _error = 'Неверный PIN-код';
+        _error = tr.wrongPin;
       });
     }
   }
@@ -403,7 +393,7 @@ class _UnlockViewState extends State<_UnlockView> {
   Future<void> _recover() async {
     if (_busy) return;
     if (!RecoveryCode.looksValid(_code.text)) {
-      setState(() => _error = 'В коде ${RecoveryCode.length} символов');
+      setState(() => _error = tr.codeLength(RecoveryCode.length));
       return;
     }
     setState(() {
@@ -419,7 +409,7 @@ class _UnlockViewState extends State<_UnlockView> {
     } on WrongSecretException {
       setState(() {
         _busy = false;
-        _error = 'Код не подходит. Проверьте регистр букв';
+        _error = tr.codeWrongCase;
       });
     }
   }
@@ -430,6 +420,8 @@ class _UnlockViewState extends State<_UnlockView> {
     if (error != null || _busy) return;
     setState(() => _busy = true);
     await widget.vault.changePin(_recovered!, _newPin.text);
+    // Код только что ввели — запомним, чтобы его можно было показать позже.
+    await widget.vault.rememberRecoveryCode(_recovered!, _code.text);
     await widget.onUnlocked(_recovered!);
   }
 
@@ -440,81 +432,62 @@ class _UnlockViewState extends State<_UnlockView> {
 
   @override
   Widget build(BuildContext context) {
-    final c = context.colors;
     return switch (_mode) {
       _Mode.pin => _LockFrame(
-          title: 'Orbit заблокирован',
-          subtitle: 'Введите PIN-код, чтобы открыть базу',
+          title: tr.lockedTitle,
+          subtitle: tr.lockedSubtitle,
           children: [
             PinField(
               controller: _pin,
-              label: 'PIN-код или пароль',
+              placeholder: tr.pinOrPassword,
               autofocus: true,
-              errorText: _blocked ? 'Слишком много попыток. Подождите $_secondsLeft с' : _error,
+              errorText: _blocked ? tr.tooManyAttempts(_secondsLeft) : _error,
               onSubmitted: (_) => _unlock(),
             ),
-            const SizedBox(height: 18),
-            if (_busy)
-              const _Busy('Проверяем…')
-            else
-              AppButton(label: 'Открыть', primary: true, onPressed: _blocked ? null : _unlock),
-            const SizedBox(height: 10),
-            TextButton(
-              onPressed: () => _switch(_Mode.recovery),
-              style: TextButton.styleFrom(foregroundColor: c.textMuted),
-              child: const Text('Забыли PIN? Войти по recovery code'),
-            ),
+            const SizedBox(height: 16),
+            if (_busy) _Busy(tr.checking) else _primary(tr.open, _blocked ? null : _unlock),
+            const SizedBox(height: 8),
+            Center(child: LinkBtn(label: tr.forgotPin, color: Pal.muted, onPressed: () => _switch(_Mode.recovery))),
           ],
         ),
       _Mode.recovery => _LockFrame(
-          title: 'Вход по recovery code',
-          subtitle: 'Введите код, который Orbit показал при первой настройке. '
-              'Потом нужно будет придумать новый PIN.',
+          title: tr.recoveryLoginTitle,
+          subtitle: tr.recoveryLoginSubtitle,
           children: [
-            TextField(
+            Field(
               controller: _code,
               autofocus: true,
-              autocorrect: false,
-              enableSuggestions: false,
-              style: const TextStyle(fontFamily: 'Menlo', fontSize: 15),
-              decoration: InputDecoration(
-                labelText: 'Recovery code',
-                hintText: 'XXXX-XXXX-XXXX-XXXX-XXXX-XXXX',
-                errorText: _error,
-                prefixIcon: const Icon(Icons.key_outlined, size: 19),
-              ),
+              placeholder: 'XXXX-XXXX-XXXX-XXXX-XXXX-XXXX',
+              icon: CupertinoIcons.lock_shield,
+              error: _error != null,
+              style: T.body.copyWith(fontFamily: 'Menlo', fontSize: 14),
               onSubmitted: (_) => _recover(),
             ),
-            const SizedBox(height: 18),
-            if (_busy)
-              const _Busy('Проверяем…')
-            else
-              AppButton(label: 'Продолжить', primary: true, onPressed: _recover),
-            const SizedBox(height: 10),
-            TextButton(
-              onPressed: () => _switch(_Mode.pin),
-              style: TextButton.styleFrom(foregroundColor: c.textMuted),
-              child: const Text('Назад к PIN-коду'),
-            ),
+            if (_error != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 6, left: 2),
+                child: Text(_error!, style: T.small.copyWith(color: Pal.red)),
+              ),
+            const SizedBox(height: 16),
+            if (_busy) _Busy(tr.checking) else _primary(tr.continueAction, _recover),
+            const SizedBox(height: 8),
+            Center(child: LinkBtn(label: tr.backToPin, color: Pal.muted, onPressed: () => _switch(_Mode.pin))),
           ],
         ),
       _Mode.newPin => _LockFrame(
-          title: 'Новый PIN-код',
-          subtitle: 'Код подошёл. Придумайте новый PIN — recovery code останется прежним.',
+          title: tr.newPinTitle,
+          subtitle: tr.newPinSubtitle,
           children: [
-            PinField(controller: _newPin, label: 'Новый PIN-код или пароль', autofocus: true),
-            const SizedBox(height: 12),
+            PinField(controller: _newPin, placeholder: tr.newPinOrPassword, autofocus: true),
+            const SizedBox(height: 10),
             PinField(
               controller: _confirm,
-              label: 'Повторите',
+              placeholder: tr.repeat,
               errorText: _error,
               onSubmitted: (_) => _setNewPin(),
             ),
-            const SizedBox(height: 18),
-            if (_busy)
-              const _Busy('Сохраняем…')
-            else
-              AppButton(label: 'Сохранить и открыть', primary: true, onPressed: _setNewPin),
+            const SizedBox(height: 16),
+            if (_busy) _Busy(tr.saving) else _primary(tr.saveAndOpen, _setNewPin),
           ],
         ),
     };

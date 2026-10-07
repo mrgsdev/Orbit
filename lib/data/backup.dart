@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'crypto.dart';
+import '../l10n/strings.dart';
 
 /// Резервная копия — один файл .orbit:
 /// «ORBK» + длина заголовка (4 байта) + заголовок JSON + зашифрованные данные.
@@ -47,11 +48,11 @@ class Backup {
   factory Backup.parse(Uint8List bytes) {
     for (var i = 0; i < 4; i++) {
       if (bytes.length < 8 || bytes[i] != _magic[i]) {
-        throw const FormatException('Это не резервная копия Orbit');
+        throw FormatException(tr.notABackup);
       }
     }
     final len = ByteData.sublistView(bytes, 4, 8).getUint32(0);
-    if (8 + len > bytes.length) throw const FormatException('Файл повреждён');
+    if (8 + len > bytes.length) throw FormatException(tr.fileCorrupted);
     final header = jsonDecode(utf8.decode(bytes.sublist(8, 8 + len))) as Map<String, dynamic>;
     return Backup._(header, bytes.sublist(8 + len));
   }

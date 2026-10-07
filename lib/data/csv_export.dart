@@ -5,6 +5,7 @@ import 'package:intl/intl.dart';
 
 import '../models/contact.dart';
 import '../models/field_schema.dart';
+import '../l10n/strings.dart';
 
 String contactsToCsv(List<Contact> contacts, List<CustomField> fields) {
   final date = DateFormat('yyyy-MM-dd');
@@ -13,17 +14,17 @@ String contactsToCsv(List<Contact> contacts, List<CustomField> fields) {
 
   final rows = [
     [
-      'Имя', 'Телефон', 'Telegram', 'Email', 'Должность', 'Компания',
-      'Где познакомились', 'Дата знакомства', 'День рождения', 'Интересы',
-      'Заметки', 'Избранное',
+      ...tr.csvHeaders,
       for (final f in fields) f.label,
     ],
     for (final c in contacts)
       [
         c.name,
-        c.phone,
+        // Все номера и адреса в одной ячейке — импорт Orbit разберёт их обратно.
+        c.phones.map((p) => p.value).join('; '),
         c.telegramHandle.isEmpty ? '' : '@${c.telegramHandle}',
-        c.email,
+        c.instagramHandle.isEmpty ? '' : '@${c.instagramHandle}',
+        c.emails.map((e) => e.value).join('; '),
         c.position,
         c.company,
         c.whereMet,
@@ -31,7 +32,7 @@ String contactsToCsv(List<Contact> contacts, List<CustomField> fields) {
         c.birthday == null ? '' : date.format(c.birthday!),
         c.interests.join(', '),
         c.notes,
-        c.favorite ? 'да' : '',
+        c.favorite ? tr.csvYes : '',
         // Даты оставляем в ISO, чтобы таблица распознала их как даты.
         for (final f in fields)
           f.type == FieldType.date

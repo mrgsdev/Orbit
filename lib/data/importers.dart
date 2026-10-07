@@ -5,6 +5,7 @@ import 'package:intl/intl.dart';
 
 import '../models/contact.dart';
 import '../models/field_schema.dart';
+import '../l10n/strings.dart';
 
 /// Результат разбора файла: черновики контактов и фото к ним (по id черновика).
 class ParsedContacts {
@@ -75,14 +76,30 @@ List<List<String>> parseCsv(String text) {
   return rows.where((r) => r.any((c) => c.trim().isNotEmpty)).toList();
 }
 
-/// Названия колонок: экспорт Orbit, Google Контакты, Outlook и просто английские.
-const _aliases = <String, List<String>>{
+/// Названия колонок: экспорт Orbit на любом языке интерфейса, Google Контакты,
+/// Outlook и просто английские.
+final _aliases = () {
+  final aliases = {for (final e in _baseAliases.entries) e.key: {...e.value}};
+  const order = [
+    'name', 'phone', 'telegram', 'instagram', 'email', 'position', 'company',
+    'whereMet', 'metDate', 'birthday', 'interests', 'notes', 'favorite',
+  ];
+  for (final l in languages) {
+    for (final (i, h) in l.csvHeaders.indexed) {
+      aliases[order[i]]!.add(h.toLowerCase());
+    }
+  }
+  return aliases;
+}();
+
+const _baseAliases = <String, List<String>>{
   'name': ['имя', 'фио', 'name', 'full name', 'display name'],
   'first': ['first name', 'given name', 'имя (first name)'],
   'last': ['last name', 'family name', 'surname', 'фамилия'],
-  'phone': ['телефон', 'phone', 'mobile', 'mobile phone', 'phone 1 - value', 'primary phone', 'мобильный'],
+  'phone': ['телефон', 'телефоны', 'phone', 'mobile', 'mobile phone', 'primary phone', 'мобильный'],
   'telegram': ['telegram', 'телеграм'],
-  'email': ['email', 'e-mail', 'почта', 'e-mail 1 - value', 'email address', 'e-mail address'],
+  'instagram': ['instagram', 'инстаграм', 'инстаграмм', 'insta'],
+  'email': ['email', 'e-mail', 'почта', 'email address', 'e-mail address'],
   'position': ['должность', 'title', 'job title', 'organization 1 - title', 'organization title'],
   'company': ['компания', 'company', 'organization', 'organization 1 - name', 'organization name'],
   'whereMet': ['где познакомились'],
@@ -102,6 +119,8 @@ ParsedContacts contactsFromCsv(List<List<String>> rows, List<CustomField> fields
     for (final f in fields)
       if (header.indexOf(f.label.trim().toLowerCase()) case final i when i != -1) f: i,
   };
+  final phoneCols = _valueColumns(header, phone: true);
+  final emailCols = _valueColumns(header, phone: false);
 
   final out = <Contact>[];
   for (var r = 1; r < rows.length; r++) {
@@ -130,9 +149,10 @@ ParsedContacts contactsFromCsv(List<List<String>> rows, List<CustomField> fields
 
     out.add(_draft(r).copyWith(
       name: name,
-      phone: get('phone'),
+      phones: _collect(row, phoneCols, phone: true),
       telegram: get('telegram'),
-      email: get('email'),
+      instagram: get('instagram'),
+      emails: _collect(row, emailCols, phone: false),
       position: get('position'),
       company: get('company'),
       whereMet: get('whereMet'),
@@ -147,7 +167,58 @@ ParsedContacts contactsFromCsv(List<List<String>> rows, List<CustomField> fields
   return ParsedContacts(out);
 }
 
-bool _truthy(String v) => const {'да', 'yes', 'true', '1', '+', 'y', 'д'}.contains(v.trim().toLowerCase());
+/// Колонки с номерами или почтой: (колонка значения, колонка подписи или -1).
+/// Их бывает несколько — Google пишет «Phone 1 - Value», «Phone 1 - Label», …
+List<(int, int)> _valueColumns(List<String> header, {required bool phone}) {
+  final numbered = RegExp(phone ? r'^phone (\d+) - value$' : r'^e-?mail (\d+) - value$');
+  final prefix = phone ? 'phone' : 'e-mail';
+  return [
+    for (var i = 0; i < header.length; i++)
+      if (_aliases[phone ? 'phone' : 'email']!.contains(header[i]))
+        (i, -1)
+      else if (numbered.firstMatch(header[i]) case final m?)
+        (
+          i,
+          header.indexWhere((h) =>
+              h == '$prefix ${m[1]} - label' ||
+              h == '$prefix ${m[1]} - type' ||
+              h == 'email ${m[1]} - label' ||
+              h == 'email ${m[1]} - type'),
+        ),
+  ];
+}
+
+/// Значения из всех колонок; в одной ячейке их может быть несколько
+/// (экспорт Orbit пишет через «;», Google — через « ::: »).
+List<LabeledValue> _collect(List<String> row, List<(int, int)> cols, {required bool phone}) {
+  final out = <LabeledValue>[];
+  for (final (vi, li) in cols) {
+    if (vi >= row.length) continue;
+    final label = normalizeLabel(li == -1 || li >= row.length ? '' : row[li], phone: phone);
+    for (final v in row[vi].split(RegExp(r'\s*(?::::|;|,)\s*'))) {
+      final value = v.trim();
+      if (value.isNotEmpty && !out.any((x) => x.value == value)) out.add(LabeledValue(label, value));
+    }
+  }
+  return out;
+}
+
+/// Подпись из файла — к нашим: «Mobile», «CELL», «work» → «мобильный», «рабочий».
+String normalizeLabel(String raw, {required bool phone}) {
+  final types = raw.toLowerCase().replaceAll('*', '').split(RegExp(r'[\s,:]+')).where((s) => s.isNotEmpty).toSet();
+  bool has(Set<String> any) => types.intersection(any).isNotEmpty;
+  if (phone && has({'cell', 'mobile', 'iphone', 'мобильный'})) return 'мобильный';
+  if (has({'work', 'рабочий'})) return 'рабочий';
+  if (has({'home', 'домашний', 'личный', 'personal'})) return phone ? 'домашний' : 'личный';
+  if (has({'other', 'другой'})) return 'другой';
+  return phone ? LabeledValue.phoneLabels.first : LabeledValue.emailLabels.first;
+}
+
+bool _truthy(String v) {
+  final s = v.trim().toLowerCase();
+  return const {'да', 'yes', 'true', '1', '+', 'y', 'д'}.contains(s) ||
+      languages.any((l) => s == l.csvYes.toLowerCase() || s == l.yes.toLowerCase());
+}
 
 List<String> _splitList(String v) =>
     v.split(RegExp(r'[,;]')).map((s) => s.trim()).where((s) => s.isNotEmpty).toSet().toList();
@@ -298,6 +369,23 @@ List<String> _splitEscaped(String s, String sep) {
 String _unescape(String s) => s.replaceAllMapped(
     RegExp(r'\\(.)'), (m) => switch (m[1]!) { 'n' || 'N' => '\n', final c => c }).trim();
 
+/// Instagram в vCard: соцсеть «instagram» (так пишут «Контакты» Apple,
+/// иногда с ником в x-user) или просто ссылка на профиль.
+String _instagram(List<_Prop> props) {
+  for (final p in props.where((p) => const {'X-SOCIALPROFILE', 'URL', 'X-INSTAGRAM'}.contains(p.name))) {
+    final m = RegExp(r'instagr(?:am\.com|\.am)/@?([A-Za-z0-9_.]+)').firstMatch(p.value);
+    if (m != null) return '@${m[1]}';
+    if (p.name == 'X-INSTAGRAM' || (p.params['TYPE'] ?? '').toLowerCase().contains('instagram')) {
+      final user = p.params['X-USER'];
+      if (user != null && user.isNotEmpty) return '@$user';
+      final parts = p.value.replaceFirst(RegExp(r'^x-apple:'), '').split('/').where((s) => s.isNotEmpty);
+      if (parts.isEmpty) continue;
+      return parts.last.startsWith('@') ? parts.last : '@${parts.last}';
+    }
+  }
+  return '';
+}
+
 (Contact, Uint8List?) _fromProps(Contact draft, List<_Prop> props) {
   _Prop? first(String name, [bool Function(_Prop)? prefer]) {
     final all = props.where((p) => p.name == name).toList();
@@ -314,8 +402,19 @@ String _unescape(String s) => s.replaceAllMapped(
   }
   if (name.isEmpty) name = first('ORG')?.components.first ?? '';
 
-  final tel = first('TEL', (p) => p.hasType('CELL'))?.value ?? '';
-  final email = first('EMAIL', (p) => p.hasType('PREF') || p.hasType('INTERNET'))?.value ?? '';
+  /// Все номера или адреса; помеченный PREF — первым, он станет основным.
+  List<LabeledValue> labeled(String name, {required bool phone}) {
+    final all = props.where((p) => p.name == name && p.value.isNotEmpty).toList();
+    // vCard 3 пишет «TYPE=pref», vCard 4 — отдельный параметр «PREF=1».
+    int pref(_Prop p) => p.hasType('PREF') || p.params.containsKey('PREF') ? 1 : 0;
+    all.sort((a, b) => pref(b) - pref(a));
+    final out = <LabeledValue>[];
+    for (final p in all) {
+      if (out.any((x) => x.value == p.value)) continue;
+      out.add(LabeledValue(normalizeLabel(p.params['TYPE'] ?? '', phone: phone), p.value));
+    }
+    return out;
+  }
 
   // Telegram прячется в разных полях: соцсети, мессенджеры, ссылки.
   var telegram = '';
@@ -351,9 +450,10 @@ String _unescape(String s) => s.replaceAllMapped(
   return (
     draft.copyWith(
       name: name,
-      phone: tel,
-      email: email,
+      phones: labeled('TEL', phone: true),
+      emails: labeled('EMAIL', phone: false),
       telegram: telegram,
+      instagram: _instagram(props),
       company: first('ORG')?.components.first ?? '',
       position: first('TITLE')?.value ?? '',
       birthday: () => parseDate(first('BDAY')?.value ?? ''),

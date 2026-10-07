@@ -1,41 +1,89 @@
-import 'package:flutter/material.dart';
+import 'dart:collection';
+
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/services.dart';
 
 import '../data/contact_store.dart';
 import '../data/crypto.dart';
-import '../data/csv_export.dart';
 import '../models/contact.dart';
 import 'avatar.dart';
-import 'contact_panel.dart';
+import 'contact_detail.dart';
+import 'contact_form.dart';
 import 'contacts_grid.dart';
 import 'contacts_table.dart';
+import 'about.dart';
+import 'dashboard.dart';
 import 'data_actions.dart';
 import 'field_editors.dart';
-import 'pagination.dart';
+import 'hotkeys.dart';
+import 'interests_panel.dart';
+import 'onboarding.dart';
 import 'schema_panel.dart';
-import 'sidebar.dart';
+import 'settings_page.dart';
+import 'spotlight.dart';
 import 'theme.dart';
 import 'widgets.dart';
+import '../l10n/strings.dart';
+import 'platform.dart';
 
 enum SortMode {
-  nameAsc('Имя: А → Я', Icons.sort_by_alpha),
-  nameDesc('Имя: Я → А', Icons.sort_by_alpha),
-  newest('Сначала новые', Icons.schedule),
-  oldest('Сначала старые', Icons.history),
-  metRecent('Недавние знакомства', Icons.handshake_outlined);
+  nameAsc,
+  nameDesc,
+  newest,
+  oldest,
+  metRecent;
 
-  final String label;
-  final IconData icon;
-  const SortMode(this.label, this.icon);
+  String get label => switch (this) {
+    SortMode.nameAsc => tr.sortNameAsc,
+    SortMode.nameDesc => tr.sortNameDesc,
+    SortMode.newest => tr.sortNewest,
+    SortMode.oldest => tr.sortOldest,
+    SortMode.metRecent => tr.sortMetRecent,
+  };
 }
 
-enum ViewMode {
-  table('Таблица', Icons.table_rows_outlined),
-  cards('Карточки', Icons.grid_view_rounded);
+enum ViewMode { list, grid }
 
-  final String label;
+/// Раздел приложения: главная или один из списков контактов.
+enum Segment {
+  dashboard(CupertinoIcons.house),
+  all(CupertinoIcons.person_2),
+  favorites(CupertinoIcons.star),
+  birthdays(CupertinoIcons.gift),
+  recent(CupertinoIcons.sparkles),
+  trash(CupertinoIcons.trash),
+  settings(CupertinoIcons.gear);
+
   final IconData icon;
-  const ViewMode(this.label, this.icon);
+  const Segment(this.icon);
+
+  String get label => switch (this) {
+    Segment.dashboard => tr.segDashboard,
+    Segment.all => tr.segAll,
+    Segment.favorites => tr.segFavorites,
+    Segment.birthdays => tr.segBirthdays,
+    Segment.recent => tr.segRecent,
+    Segment.trash => tr.segTrash,
+    Segment.settings => tr.settings,
+  };
+
+  /// Сочетание для перехода в раздел.
+  HotkeyAction? get hotkey => switch (this) {
+    Segment.dashboard => HotkeyAction.goDashboard,
+    Segment.all => HotkeyAction.goContacts,
+    Segment.favorites => HotkeyAction.goFavorites,
+    Segment.birthdays => HotkeyAction.goBirthdays,
+    Segment.recent => HotkeyAction.goRecent,
+    Segment.trash => HotkeyAction.goTrash,
+    Segment.settings => null,
+  };
+
+  bool test(Contact c, DateTime now) => switch (this) {
+    Segment.favorites => c.favorite,
+    Segment.recent => now.difference(c.createdAt).inDays < 30,
+    Segment.birthdays => (c.daysUntilBirthday(now) ?? 999) <= 30,
+    _ => true,
+  };
 }
 
 class HomePage extends StatefulWidget {
@@ -43,7 +91,10 @@ class HomePage extends StatefulWidget {
   final Vault vault;
   final VoidCallback onLock;
 
-  const HomePage({super.key, required this.store, required this.vault, required this.onLock});
+  /// Показать знакомство: первый запуск, база только что создана.
+  final bool onboarding;
+
+  const HomePage({super.key, required this.store, required this.vault, required this.onLock, this.onboarding = false});
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -52,44 +103,113 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   final _search = TextEditingController();
   final _searchFocus = FocusNode();
+  final _listFocus = FocusNode(debugLabel: 'contacts');
 
-  Segment _segment = Segment.all;
-  final Set<String> _interests = {};
+  Segment _segment = Segment.dashboard;
+
+  /// Фильтр по интересу; пустая строка — все.
+  String _interest = '';
   SortMode _sort = SortMode.nameAsc;
-  ViewMode _view = ViewMode.table;
-  bool _showStats = true;
-  int _page = 0;
-  int _pageSize = 10;
-  final Set<String> _selected = {};
+  ViewMode _view = ViewMode.list;
+
+  /// Выделение в порядке добавления; [_anchor] — опора для ⇧-клика.
+  final LinkedHashSet<String> _selected = LinkedHashSet();
+  String? _anchor;
+  String? _lastTapId;
+  DateTime _lastTapAt = DateTime(0);
 
   ContactStore get store => widget.store;
 
   @override
   void initState() {
     super.initState();
-    _search.addListener(() => setState(() => _page = 0));
+    _search.addListener(() {
+      // Поиск всегда показывает список, даже если открыта главная.
+      if (_search.text.isNotEmpty && {Segment.dashboard, Segment.settings}.contains(_segment)) _segment = Segment.all;
+      setState(() {});
+    });
+    _listFocus.addListener(() => setState(() {}));
+    // Горячие клавиши ловим на уровне клавиатуры, а не фокуса: так они
+    // работают, где бы ни был фокус (например, после записи нового сочетания).
+    HardwareKeyboard.instance.addHandler(_onHotkey);
+    if (widget.onboarding) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _onboarding();
+      });
+    }
+  }
+
+  bool _onHotkey(KeyEvent e) {
+    if (e is! KeyDownEvent || !mounted || Hotkeys.recording) return false;
+    // Пока поверх открыто окно (редактор, поиск, знакомство), сочетания
+    // главного окна не срабатывают.
+    if (ModalRoute.of(context)?.isCurrent == false) return false;
+    final hotkeys = HotkeysScope.read(context);
+    final combo = Combo.fromEvent(e);
+    for (final a in HotkeyAction.values) {
+      if (hotkeys.of(a) != combo) continue;
+      switch (a) {
+        case HotkeyAction.search:
+          _spotlight();
+        case HotkeyAction.newContact:
+          _create();
+        case HotkeyAction.settings:
+          _openSettings();
+        case HotkeyAction.lock:
+          widget.onLock();
+        case HotkeyAction.goDashboard:
+          _go(Segment.dashboard);
+        case HotkeyAction.goContacts:
+          _go(Segment.all);
+        case HotkeyAction.goFavorites:
+          _go(Segment.favorites);
+        case HotkeyAction.goBirthdays:
+          _go(Segment.birthdays);
+        case HotkeyAction.goRecent:
+          _go(Segment.recent);
+        case HotkeyAction.goTrash:
+          _go(Segment.trash);
+      }
+      return true;
+    }
+    return false;
+  }
+
+  SettingsSection _settingsSection = SettingsSection.general;
+
+  void _openSettings([SettingsSection section = SettingsSection.general]) {
+    _settingsSection = section;
+    _go(Segment.settings);
+  }
+
+  Future<void> _onboarding() async {
+    final result = await showOnboarding(context);
+    if (mounted && result == OnboardingResult.openShortcuts) _openSettings(SettingsSection.shortcuts);
   }
 
   @override
   void dispose() {
+    HardwareKeyboard.instance.removeHandler(_onHotkey);
     _search.dispose();
     _searchFocus.dispose();
+    _listFocus.dispose();
     super.dispose();
   }
+
+  // ── Данные ──
+
+  List<Contact> get _source => _segment == Segment.trash ? store.trash : store.contacts;
 
   List<Contact> _filtered() {
     final now = DateTime.now();
     final q = _search.text.trim();
     final list = _source.where((c) {
       if (!_segment.test(c, now)) return false;
-      if (_interests.isNotEmpty && !_interests.every(c.interests.contains)) return false;
+      if (_interest.isNotEmpty && !c.interests.contains(_interest)) return false;
       return q.isEmpty || c.matches(q);
     }).toList();
 
-    // Корзина уже упорядочена: сначала недавно удалённые.
     if (_segment == Segment.trash) return list;
-
-    // В разделе дней рождения важнее всего, чей праздник ближе.
     if (_segment == Segment.birthdays) {
       list.sort((a, b) => a.daysUntilBirthday(now)!.compareTo(b.daysUntilBirthday(now)!));
       return list;
@@ -101,71 +221,125 @@ class _HomePageState extends State<HomePage> {
       SortMode.newest => (a, b) => b.createdAt.compareTo(a.createdAt),
       SortMode.oldest => (a, b) => a.createdAt.compareTo(b.createdAt),
       SortMode.metRecent => (a, b) {
-          if (a.metDate == null) return b.metDate == null ? byName(a, b) : 1;
-          if (b.metDate == null) return -1;
-          return b.metDate!.compareTo(a.metDate!);
-        },
+        if (a.metDate == null) return b.metDate == null ? byName(a, b) : 1;
+        if (b.metDate == null) return -1;
+        return b.metDate!.compareTo(a.metDate!);
+      },
     });
     return list;
   }
 
-  /// Контакты текущего раздела: корзина или активные.
-  List<Contact> get _source => _segment == Segment.trash ? store.trash : store.contacts;
+  // ── Навигация и выделение ──
 
-  void _resetFilters() => setState(() {
-        _segment = Segment.all;
-        _interests.clear();
-        _search.clear();
-        _page = 0;
-      });
+  void _go(Segment s) => setState(() {
+    _segment = s;
+    _selected.clear();
+    _anchor = null;
+    _lastTapId = null;
+    if (s == Segment.dashboard) _search.clear();
+  });
 
-  Future<void> _open(Contact c) => showContactPanel(context, store: store, contact: c);
+  /// Открыть человека в общем списке — с дашборда.
+  void _openContact(Contact c) => setState(() {
+    _segment = Segment.all;
+    _interest = '';
+    _search.clear();
+    _selected
+      ..clear()
+      ..add(c.id);
+    _anchor = c.id;
+  });
 
-  Future<void> _create() => showContactPanel(context, store: store);
-
-  Future<void> _export(List<Contact> contacts) async {
-    if (contacts.isEmpty) {
-      showToast(context, 'Нечего экспортировать');
+  /// Клик: обычный — один, ⌘ — добавить/убрать, ⇧ — диапазон, двойной — правка.
+  void _tap(Contact c, List<Contact> visible, {bool toggle = false}) {
+    _listFocus.requestFocus();
+    final keys = HardwareKeyboard.instance;
+    final now = DateTime.now();
+    final isDouble = !toggle && _lastTapId == c.id && now.difference(_lastTapAt) < const Duration(milliseconds: 400);
+    _lastTapId = c.id;
+    _lastTapAt = now;
+    if (isDouble && !Os.primaryPressed && !keys.isShiftPressed) {
+      _lastTapId = null;
+      _edit(c);
       return;
     }
-    try {
-      if (await exportContactsCsv(contacts, store.allFields.toList()) && mounted) {
-        showToast(context,
-            'Сохранено: ${contacts.length} ${plural(contacts.length, 'контакт', 'контакта', 'контактов')}');
+    setState(() {
+      if (toggle || Os.primaryPressed) {
+        _selected.contains(c.id) ? _selected.remove(c.id) : _selected.add(c.id);
+        _anchor = c.id;
+      } else if (keys.isShiftPressed && _anchor != null) {
+        final a = visible.indexWhere((x) => x.id == _anchor);
+        final b = visible.indexWhere((x) => x.id == c.id);
+        if (a != -1 && b != -1) {
+          _selected
+            ..clear()
+            ..addAll([for (var i = a < b ? a : b; i <= (a < b ? b : a); i++) visible[i].id]);
+        }
+      } else {
+        _selected
+          ..clear()
+          ..add(c.id);
+        _anchor = c.id;
       }
-    } catch (e) {
-      if (mounted) showToast(context, 'Не удалось сохранить файл: $e');
-    }
+    });
   }
 
-  /// Из списка — в корзину, с возможностью сразу отменить.
-  Future<void> _deleteSelected() async {
-    final ids = {..._selected};
+  void _move(int delta, List<Contact> visible) {
+    if (visible.isEmpty) return;
+    final current = _anchor == null ? -1 : visible.indexWhere((x) => x.id == _anchor);
+    final next = (current + delta).clamp(0, visible.length - 1);
+    setState(() {
+      _selected
+        ..clear()
+        ..add(visible[next].id);
+      _anchor = visible[next].id;
+    });
+  }
+
+  // ── Действия ──
+
+  /// ⌘F — быстрый поиск; выбранный человек открывается отдельной
+  /// карточкой поверх текущего экрана, вкладка при этом не меняется.
+  Future<void> _spotlight() async {
+    final c = await showSpotlight(context, store: store);
+    if (c == null || !mounted) return;
+    await showContactCard(context, store: store, contact: c, onEdit: _edit, onDelete: (c) => _trash({c.id}));
+  }
+
+  Future<void> _create() async {
+    final c = await showContactEditor(context, store: store);
+    if (c != null && mounted) _openContact(c);
+  }
+
+  Future<void> _edit(Contact c) async {
+    if (!c.isDeleted) await showContactEditor(context, store: store, contact: c);
+  }
+
+  /// В корзину — без вопросов, зато с «Отменить».
+  Future<void> _trash(Set<String> ids) async {
+    if (ids.isEmpty) return;
+    final single = ids.length == 1 ? store.byId(ids.first)?.name : null;
     await store.deleteMany(ids);
     setState(_selected.clear);
     showUndoToast(
-      'В корзине: ${ids.length} ${plural(ids.length, 'контакт', 'контакта', 'контактов')}',
+      single != null ? tr.movedToTrashOne(single) : tr.movedToTrashMany(ids.length),
       onUndo: () => store.restore(ids),
     );
   }
 
-  Future<void> _restoreSelected() async {
-    final ids = {..._selected};
+  Future<void> _restore(Set<String> ids) async {
     await store.restore(ids);
     setState(_selected.clear);
-    showUndoToast(
-      'Восстановлено: ${ids.length} ${plural(ids.length, 'контакт', 'контакта', 'контактов')}',
-      onUndo: () => store.deleteMany(ids),
-    );
+    showUndoToast(tr.restoredMany(ids.length), onUndo: () => store.deleteMany(ids));
   }
 
   Future<void> _purge(Set<String> ids) async {
-    final n = ids.length;
+    if (ids.isEmpty) return;
     final ok = await confirmDialog(
       context,
-      title: 'Удалить навсегда $n ${plural(n, 'контакт', 'контакта', 'контактов')}?',
-      message: 'Контакты и их фото будут удалены без возможности восстановления.',
-      confirmLabel: 'Удалить навсегда',
+      title: tr.purgeTitle(ids.length),
+      message: tr.purgeMessage,
+      confirmLabel: tr.delete,
       destructive: true,
     );
     if (!ok) return;
@@ -173,111 +347,203 @@ class _HomePageState extends State<HomePage> {
     setState(_selected.clear);
   }
 
+  Future<void> _export(List<Contact> contacts) => exportContacts(store, contacts);
+
+  // ── Интерфейс ──
+
   @override
   Widget build(BuildContext context) {
-    return CallbackShortcuts(
-      bindings: {
-        const SingleActivator(LogicalKeyboardKey.keyN, meta: true): _create,
-        const SingleActivator(LogicalKeyboardKey.keyN, control: true): _create,
-        const SingleActivator(LogicalKeyboardKey.keyK, meta: true): _searchFocus.requestFocus,
-        const SingleActivator(LogicalKeyboardKey.keyK, control: true): _searchFocus.requestFocus,
-      },
+    // Перестраиваемся, когда меняются сочетания: подсказки показывают их.
+    HotkeysScope.of(context);
+    return KeyedSubtree(
+      // Фокус по умолчанию — для клавиш списка (стрелки, ⌫, Enter).
       child: Focus(
         autofocus: true,
-        child: Scaffold(
-          body: ListenableBuilder(
-            listenable: store,
-            builder: (context, _) {
-              // В выделении — только контакты текущего раздела.
-              final visible = {for (final c in _source) c.id};
-              _selected.removeWhere((id) => !visible.contains(id));
-              _interests.removeWhere((i) => !store.allInterests.contains(i));
-              return Row(
-                children: [
-                  SizedBox(
-                    width: 268,
-                    child: Sidebar(
-                      store: store,
-                      segment: _segment,
-                      onSegment: (s) => setState(() {
-                        _segment = s;
-                        _page = 0;
-                      }),
-                      interests: _interests,
-                      onToggleInterest: (i) => setState(() {
-                        _interests.contains(i) ? _interests.remove(i) : _interests.add(i);
-                        _page = 0;
-                      }),
-                      search: _search,
-                      searchFocus: _searchFocus,
-                      onExport: () => _export(store.contacts),
-                      onEditFields: () => showSchemaPanel(context, store: store),
-                      onImport: () => importContacts(context, store),
-                      onBackup: () => createBackup(context, store, widget.vault),
-                      onRestore: () => restoreBackup(context, store),
-                      onChangePin: () => changePin(context, store, widget.vault),
-                      onLock: widget.onLock,
-                    ),
-                  ),
-                  Expanded(child: _main()),
-                ],
-              );
-            },
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _main() {
-    final c = context.colors;
-    final filtered = _filtered();
-    final pageCount = (filtered.length / _pageSize).ceil().clamp(1, 1 << 30);
-    final page = _page.clamp(0, pageCount - 1);
-    final pageItems = filtered.skip(page * _pageSize).take(_pageSize).toList();
-
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(0, 12, 12, 12),
-      child: Container(
-        decoration: cardDecoration(c, radius: 18).copyWith(
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.03),
-              blurRadius: 12,
-              offset: const Offset(0, 2),
-            ),
-          ],
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            _header(filtered.length),
-            const Divider(),
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
-                child: Column(
+        child: ListenableBuilder(
+          listenable: store,
+          builder: (context, _) {
+            final visibleIds = {for (final c in _source) c.id};
+            _selected.removeWhere((id) => !visibleIds.contains(id));
+            if (_interest.isNotEmpty && !store.allInterests.contains(_interest)) _interest = '';
+            return ColoredBox(
+              color: Pal.canvas,
+              // Меньше этого интерфейс не сжимается — см. MainFlutterWindow.swift.
+              child: MinSize(
+                minWidth: 1080,
+                minHeight: 480,
+                child: Row(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    _toolbar(filtered),
-                    _activeFilters(),
-                    AnimatedSize(
-                      duration: const Duration(milliseconds: 220),
-                      curve: Curves.easeOutCubic,
-                      alignment: Alignment.topCenter,
-                      child: _showStats && _segment != Segment.trash
-                          ? Padding(
-                              padding: const EdgeInsets.only(top: 20),
-                              child: _StatsRow(store: store),
-                            )
-                          : const SizedBox(width: double.infinity),
+                    _Rail(
+                      segment: _segment,
+                      trashCount: store.trash.length,
+                      onSelect: _go,
+                      onFields: () => showSchemaPanel(context, store: store),
+                      onInterests: () => showInterestsPanel(context, store: store),
+                      onSettings: _openSettings,
+                      onLock: widget.onLock,
                     ),
-                    const SizedBox(height: 20),
-                    Expanded(child: _listCard(filtered, pageItems, page, pageCount)),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          _topBar(),
+                          Expanded(
+                            child: AnimatedSwitcher(
+                              duration: const Duration(milliseconds: 200),
+                              // Страницы занимают всю область, а не встают по центру.
+                              layoutBuilder: (current, previous) =>
+                                  Stack(fit: StackFit.expand, children: [...previous, ?current]),
+                              child: switch (_segment) {
+                                Segment.dashboard => Dashboard(
+                                  key: const ValueKey('dashboard'),
+                                  store: store,
+                                  onSegment: _go,
+                                ),
+                                Segment.settings => SettingsPage(
+                                  // Ключ по разделу: «Изменить сочетания» из знакомства
+                                  // открывает нужный раздел, даже если настройки уже открыты.
+                                  key: ValueKey('settings-${_settingsSection.name}'),
+                                  store: store,
+                                  vault: widget.vault,
+                                  onLock: widget.onLock,
+                                  onOnboarding: _onboarding,
+                                  initialSection: _settingsSection,
+                                ),
+                                _ => KeyedSubtree(key: const ValueKey('contacts'), child: _contactsPage()),
+                              },
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   ],
                 ),
               ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _topBar() {
+    final total = store.contacts.length;
+    return SizedBox(
+      height: 84,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(28, 14, 28, 6),
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            Align(
+              alignment: Alignment.centerLeft,
+              child: SizedBox(
+                width: 360,
+                child: Field(
+                  controller: _search,
+                  focusNode: _searchFocus,
+                  placeholder: tr.searchPlaceholder,
+                  icon: CupertinoIcons.search,
+                  radius: 22,
+                  fill: Pal.searchFill,
+                  suffix: _search.text.isEmpty
+                      ? Padding(
+                          padding: const EdgeInsets.only(right: 8),
+                          child: Text(
+                            HotkeysScope.of(context).of(HotkeyAction.search).label,
+                            style: T.tiny.copyWith(color: Pal.dim),
+                          ),
+                        )
+                      : IconBtn(icon: CupertinoIcons.xmark, hint: tr.clear, size: 28, onPressed: _search.clear),
+                ),
+              ),
+            ),
+            Text(_segment == Segment.dashboard ? 'Orbit' : _segment.label, style: T.script),
+            Align(
+              alignment: Alignment.centerRight,
+              child: Popover(
+                width: 300,
+                estimatedHeight: 360,
+                alignRight: true,
+                anchor: (context, toggle, open) => Pressable(
+                  onTap: toggle,
+                  builder: (context, hover, _) => Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.end,
+                        children: [
+                          Text(tr.personalBase, style: T.body.copyWith(fontWeight: FontWeight.w600)),
+                          const SizedBox(height: 2),
+                          Text(tr.people(total), style: T.small),
+                        ],
+                      ),
+                      const SizedBox(width: 12),
+                      ClipOval(child: Image.asset('assets/images/app_icon.png', width: 42, height: 42)),
+                      const SizedBox(width: 10),
+                      AnimatedRotation(
+                        turns: open ? 0.5 : 0,
+                        duration: const Duration(milliseconds: 140),
+                        child: Icon(CupertinoIcons.chevron_down, size: 16, color: hover ? Pal.text : Pal.muted),
+                      ),
+                    ],
+                  ),
+                ),
+                content: (context, close) {
+                  void run(VoidCallback action) {
+                    close();
+                    action();
+                  }
+
+                  return Menu(
+                    maxHeight: 640,
+                    children: [
+                      MenuItem(
+                        label: tr.menuImport,
+                        icon: CupertinoIcons.tray_arrow_down,
+                        onTap: () => run(() => importContacts(context, store)),
+                      ),
+                      MenuItem(
+                        label: tr.exportCsv,
+                        icon: CupertinoIcons.tray_arrow_up,
+                        onTap: () => run(() => _export(store.contacts)),
+                      ),
+                      const MenuDivider(),
+                      MenuItem(
+                        label: tr.menuBackup,
+                        icon: CupertinoIcons.lock_shield,
+                        onTap: () => run(() => createBackup(context, store, widget.vault)),
+                      ),
+                      MenuItem(
+                        label: tr.menuRestore,
+                        icon: CupertinoIcons.arrow_counterclockwise,
+                        onTap: () => run(() => restoreBackup(context, store)),
+                      ),
+                      const MenuDivider(),
+                      MenuItem(
+                        label: tr.menuSettings,
+                        icon: CupertinoIcons.gear,
+                        trailing: Text(HotkeysScope.of(context).of(HotkeyAction.settings).label, style: T.small),
+                        onTap: () => run(_openSettings),
+                      ),
+                      MenuItem(
+                        label: tr.lock,
+                        icon: CupertinoIcons.lock,
+                        trailing: Text(HotkeysScope.of(context).of(HotkeyAction.lock).label, style: T.small),
+                        onTap: () => run(widget.onLock),
+                      ),
+                      const MenuDivider(),
+                      MenuItem(
+                        label: tr.about,
+                        icon: CupertinoIcons.info_circle,
+                        onTap: () => run(() => showAbout(context)),
+                      ),
+                    ],
+                  );
+                },
+              ),
             ),
           ],
         ),
@@ -285,697 +551,477 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _header(int shown) {
-    final c = context.colors;
-    final favorites = store.contacts.where((x) => x.favorite).toList();
+  // ── Список контактов ──
+
+  Widget _contactsPage() {
+    final filtered = _filtered();
     return Padding(
-      padding: const EdgeInsets.fromLTRB(24, 18, 20, 18),
+      padding: const EdgeInsets.fromLTRB(28, 6, 28, 28),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(_segment.label, style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w700)),
-          const SizedBox(width: 10),
-          Tag('$shown', fontSize: 13),
-          if (_segment == Segment.trash) ...[
-            const SizedBox(width: 14),
-            Text(
-              'Удаляются навсегда через ${ContactStore.trashDays} дней',
-              style: TextStyle(fontSize: 13, color: c.textMuted),
-            ),
-          ],
-          const Spacer(),
-          if (_segment == Segment.trash && store.trash.isNotEmpty) ...[
-            AppButton(
-              label: 'Очистить корзину',
-              icon: Icons.delete_forever_outlined,
-              danger: true,
-              onPressed: () => _purge({for (final x in store.trash) x.id}),
-            ),
-            const SizedBox(width: 12),
-          ],
-          if (favorites.isNotEmpty) ...[
-            Tooltip(
-              message: 'Избранные',
-              child: InkWell(
-                borderRadius: BorderRadius.circular(20),
-                onTap: () => setState(() {
-                  _segment = Segment.favorites;
-                  _page = 0;
-                }),
-                child: SizedBox(
-                  height: 38,
-                  width: 30.0 * favorites.take(4).length + (favorites.length > 4 ? 30 : 0) + 8,
-                  child: Stack(
-                    children: [
-                      for (var i = 0; i < favorites.take(4).length; i++)
-                        Positioned(
-                          left: i * 30.0,
-                          child: ContactAvatar(
-                            name: favorites[i].name,
-                            photo: store.photoOf(favorites[i]),
-                            radius: 17,
-                            ring: true,
-                          ),
-                        ),
-                      if (favorites.length > 4)
-                        Positioned(
-                          left: 4 * 30.0,
-                          child: Container(
-                            width: 38,
-                            height: 38,
-                            alignment: Alignment.center,
-                            decoration: BoxDecoration(
-                              color: c.accentSoft,
-                              shape: BoxShape.circle,
-                              border: Border.all(color: c.surface, width: 2),
-                            ),
-                            child: Text(
-                              '+${favorites.length - 4}',
-                              style: TextStyle(
-                                fontSize: 11.5,
-                                fontWeight: FontWeight.w700,
-                                color: c.accent,
-                              ),
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
+          Expanded(
+            child: Panel(
+              padding: const EdgeInsets.fromLTRB(26, 24, 26, 10),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _listHeader(filtered),
+                  const SizedBox(height: 18),
+                  Expanded(child: _listBody(filtered)),
+                ],
               ),
             ),
-            const SizedBox(width: 12),
-            SizedBox(height: 24, child: VerticalDivider(color: c.border)),
-            const SizedBox(width: 12),
-          ],
-          SquareIconButton(
-            icon: Icons.search,
-            tooltip: 'Поиск (⌘K)',
-            onPressed: _searchFocus.requestFocus,
+          ),
+          const SizedBox(width: 20),
+          SizedBox(
+            width: 380,
+            child: Panel(padding: EdgeInsets.zero, child: _detail()),
           ),
         ],
       ),
     );
   }
 
-  Widget _toolbar(List<Contact> filtered) {
-    final c = context.colors;
+  Widget _listHeader(List<Contact> filtered) {
     final interests = store.interestCounts;
-    return Row(
+    final filters = [
+      if (_segment != Segment.trash && interests.isNotEmpty)
+        Dropdown<String>(
+          value: _interest,
+          icon: CupertinoIcons.line_horizontal_3_decrease,
+          width: 240,
+          height: 38,
+          items: [('', tr.allInterests), for (final e in interests) (e.key, '${e.key} · ${e.value}')],
+          onChanged: (v) => setState(() => _interest = v),
+        ),
+      if (_segment != Segment.birthdays && _segment != Segment.trash)
+        Dropdown<SortMode>(
+          value: _sort,
+          icon: CupertinoIcons.arrow_up_arrow_down,
+          width: 240,
+          height: 38,
+          items: [for (final s in SortMode.values) (s, s.label)],
+          onChanged: (v) => setState(() => _sort = v),
+        ),
+      if (_segment != Segment.trash)
+        IconBtn(
+          icon: CupertinoIcons.tag,
+          hint: tr.interestsHint,
+          filled: true,
+          size: 38,
+          onPressed: () => showInterestsPanel(context, store: store),
+        ),
+      if (_view == ViewMode.list) ColumnsButton(store: store),
+      if (_segment == Segment.trash && store.trash.isNotEmpty)
+        Btn(
+          label: tr.emptyTrash,
+          icon: CupertinoIcons.trash,
+          kind: BtnKind.danger,
+          small: true,
+          onPressed: () => _purge({for (final c in store.trash) c.id}),
+        ),
+    ];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        MenuAnchor(
-          builder: (context, ctrl, _) => AppButton(
-            label: _view.label,
-            icon: _view.icon,
-            trailingIcon: Icons.expand_more,
-            onPressed: () => ctrl.isOpen ? ctrl.close() : ctrl.open(),
-          ),
-          menuChildren: [
-            for (final v in ViewMode.values)
-              MenuItemButton(
-                leadingIcon: Icon(v.icon, size: 18),
-                trailingIcon: v == _view ? Icon(Icons.check, size: 16, color: c.accent) : null,
-                onPressed: () => setState(() => _view = v),
-                child: Text(v.label),
-              ),
-          ],
-        ),
-        const SizedBox(width: 10),
-        SizedBox(height: 24, child: VerticalDivider(color: c.border)),
-        const SizedBox(width: 10),
-        MenuAnchor(
-          builder: (context, ctrl, _) => AppButton(
-            label: 'Фильтр',
-            icon: Icons.filter_list_rounded,
-            badge: _interests.isEmpty
-                ? null
-                : Tag('${_interests.length}', background: c.accent, foreground: Colors.white, fontSize: 11),
-            onPressed: () => ctrl.isOpen ? ctrl.close() : ctrl.open(),
-          ),
-          menuChildren: [
-            if (interests.isEmpty)
-              const MenuItemButton(child: Text('Интересов пока нет')),
-            for (final e in interests)
-              CheckboxMenuButton(
-                value: _interests.contains(e.key),
-                closeOnActivate: false,
-                onChanged: (v) => setState(() {
-                  v == true ? _interests.add(e.key) : _interests.remove(e.key);
-                  _page = 0;
-                }),
-                trailingIcon: Text('${e.value}', style: TextStyle(color: c.textMuted, fontSize: 12.5)),
-                child: Text(e.key),
-              ),
-            if (_interests.isNotEmpty) ...[
-              const Divider(),
-              MenuItemButton(
-                leadingIcon: const Icon(Icons.close, size: 16),
-                onPressed: () => setState(_interests.clear),
-                child: const Text('Сбросить'),
-              ),
-            ],
-          ],
-        ),
-        const SizedBox(width: 8),
-        MenuAnchor(
-          builder: (context, ctrl, _) => AppButton(
-            label: _segment == Segment.birthdays ? 'По дате праздника' : _sort.label,
-            icon: Icons.swap_vert_rounded,
-            onPressed: _segment == Segment.birthdays
-                ? null
-                : () => ctrl.isOpen ? ctrl.close() : ctrl.open(),
-          ),
-          menuChildren: [
-            for (final s in SortMode.values)
-              MenuItemButton(
-                leadingIcon: Icon(s.icon, size: 18),
-                trailingIcon: s == _sort ? Icon(Icons.check, size: 16, color: c.accent) : null,
-                onPressed: () => setState(() => _sort = s),
-                child: Text(s.label),
-              ),
-          ],
-        ),
-        const SizedBox(width: 18),
-        Text('Статистика', style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600)),
-        const SizedBox(width: 8),
-        Transform.scale(
-          scale: 0.8,
-          child: Switch(
-            value: _showStats,
-            onChanged: (v) => setState(() => _showStats = v),
-          ),
-        ),
-        const Spacer(),
-        SquareIconButton(
-          icon: Icons.file_upload_outlined,
-          tooltip: 'Импорт из CSV или vCard',
-          onPressed: () => importContacts(context, store),
-        ),
-        const SizedBox(width: 8),
-        SquareIconButton(
-          icon: Icons.file_download_outlined,
-          tooltip: 'Экспорт в CSV',
-          onPressed: () => _export(filtered),
-        ),
-        const SizedBox(width: 10),
-        AppButton(
-          label: 'Новый контакт',
-          icon: Icons.add_rounded,
-          primary: true,
-          onPressed: _create,
-        ),
+        _titleRow(filtered),
+        if (filters.isNotEmpty) ...[
+          const SizedBox(height: 14),
+          // Переносится на вторую строку, если окно узкое.
+          Wrap(spacing: 10, runSpacing: 10, crossAxisAlignment: WrapCrossAlignment.center, children: filters),
+        ],
       ],
     );
   }
 
-  Widget _activeFilters() {
-    final c = context.colors;
-    final chips = <Widget>[
-      if (_search.text.trim().isNotEmpty)
-        _FilterChip(label: '«${_search.text.trim()}»', onRemove: _search.clear),
-      for (final i in _interests)
-        _FilterChip(
-          label: i,
-          dot: TagColors.hue(i),
-          onRemove: () => setState(() => _interests.remove(i)),
-        ),
-    ];
-    if (chips.isEmpty) return const SizedBox.shrink();
-    return Padding(
-      padding: const EdgeInsets.only(top: 14),
-      child: Wrap(
-        spacing: 8,
-        runSpacing: 8,
-        crossAxisAlignment: WrapCrossAlignment.center,
-        children: [
-          Text('Фильтры:', style: TextStyle(fontSize: 13, color: c.textMuted)),
-          ...chips,
-          TextButton(
-            onPressed: _resetFilters,
-            style: TextButton.styleFrom(foregroundColor: c.accent),
-            child: const Text('Сбросить всё'),
+  Widget _titleRow(List<Contact> filtered) {
+    return Row(
+      children: [
+        Expanded(
+          child: Row(
+            children: [
+              Flexible(
+                child: Text(_segment.label, overflow: TextOverflow.ellipsis, style: T.title.copyWith(fontSize: 22)),
+              ),
+              const SizedBox(width: 12),
+              Tag('${filtered.length}', color: Pal.accent),
+            ],
           ),
+        ),
+        const SizedBox(width: 16),
+        IconBtn(
+          icon: CupertinoIcons.list_bullet,
+          hint: tr.viewTable,
+          filled: true,
+          size: 42,
+          active: _view == ViewMode.list,
+          onPressed: () => setState(() => _view = ViewMode.list),
+        ),
+        const SizedBox(width: 6),
+        IconBtn(
+          icon: CupertinoIcons.square_grid_2x2,
+          hint: tr.viewCards,
+          filled: true,
+          size: 42,
+          active: _view == ViewMode.grid,
+          onPressed: () => setState(() => _view = ViewMode.grid),
+        ),
+        // В избранных и в корзине новый контакт не создают.
+        if (_segment != Segment.favorites && _segment != Segment.trash) ...[
+          const SizedBox(width: 10),
+          Btn.primary(label: tr.newShort, icon: CupertinoIcons.plus, onPressed: _create),
         ],
-      ),
+      ],
     );
   }
 
-  Widget _listCard(List<Contact> filtered, List<Contact> pageItems, int page, int pageCount) {
-    final c = context.colors;
+  Widget _emptyArt(String asset, {double width = 150}) => Image.asset(
+    asset,
+    width: width,
+    height: 150,
+    cacheWidth: (width * MediaQuery.devicePixelRatioOf(context)).round(),
+  );
+
+  Widget _listBody(List<Contact> filtered) {
     final Widget body;
-    if (_segment == Segment.trash && filtered.isEmpty && _search.text.trim().isEmpty) {
-      body = _EmptyState(
-        icon: Icons.delete_outline_rounded,
-        title: 'Корзина пуста',
-        subtitle: 'Удалённые контакты хранятся здесь ${ContactStore.trashDays} дней — '
-            'их можно восстановить',
-        action: AppButton(label: 'К контактам', onPressed: () => setState(() => _segment = Segment.all)),
-      );
-    } else if (store.contacts.isEmpty && _segment != Segment.trash) {
-      body = _EmptyState(
-        icon: Icons.contacts_outlined,
-        showLogo: true,
-        title: 'Контактов пока нет',
-        subtitle: 'Добавьте первого человека — имя, телефон, Telegram и где познакомились',
-        action: Row(
-          mainAxisSize: MainAxisSize.min,
+    // У корзины и разделов с карточек свои картинки, даже когда база пуста.
+    if (store.contacts.isEmpty &&
+        !{Segment.trash, Segment.favorites, Segment.recent, Segment.birthdays}.contains(_segment)) {
+      body = EmptyState(
+        image: Image.asset('assets/images/logo.png', width: 120, height: 120),
+        title: tr.noContactsTitle,
+        subtitle: tr.noContactsSubtitle,
+        action: Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          alignment: WrapAlignment.center,
           children: [
-            AppButton(
-              label: 'Импорт',
-              icon: Icons.file_upload_outlined,
+            Btn(
+              label: tr.importShort,
+              icon: CupertinoIcons.tray_arrow_down,
               onPressed: () => importContacts(context, store),
             ),
-            const SizedBox(width: 10),
-            AppButton(label: 'Новый контакт', icon: Icons.add_rounded, primary: true, onPressed: _create),
+            Btn.primary(label: tr.newContact, icon: CupertinoIcons.plus, onPressed: _create),
           ],
         ),
       );
     } else if (filtered.isEmpty) {
-      body = _EmptyState(
-        icon: Icons.search_off_rounded,
-        title: 'Ничего не найдено',
-        subtitle: 'Попробуйте изменить запрос или сбросить фильтры',
-        action: AppButton(label: 'Сбросить фильтры', onPressed: _resetFilters),
-      );
-    } else if (_view == ViewMode.table) {
+      final q = _search.text.trim();
+      body = q.isNotEmpty
+          ? EmptyState(icon: CupertinoIcons.search, title: tr.nothingFound, subtitle: tr.nothingFoundFor(q))
+          : _segment == Segment.trash
+          ? EmptyState(
+              image: _emptyArt('assets/images/empty_trash.png'),
+              title: tr.trashEmpty,
+              subtitle: tr.trashEmptySubtitle(ContactStore.trashDays),
+            )
+          : _segment == Segment.favorites
+          ? EmptyState(
+              image: _emptyArt('assets/images/empty_favorites.png'),
+              title: tr.favoritesEmpty,
+              subtitle: tr.favoritesEmptySubtitle,
+            )
+          : _segment == Segment.recent
+          ? EmptyState(
+              image: _emptyArt('assets/images/card_new.png'),
+              title: tr.recentEmpty,
+              subtitle: tr.recentEmptySubtitle,
+            )
+          : _segment == Segment.birthdays
+          ? EmptyState(
+              image: _emptyArt('assets/images/card_birthdays.png', width: 220),
+              title: tr.birthdaysEmpty,
+              subtitle: tr.birthdaysEmptySubtitle,
+            )
+          : EmptyState(icon: _segment.icon, title: tr.segmentEmpty, subtitle: tr.segmentEmptySubtitle);
+    } else if (_view == ViewMode.list) {
       body = ContactsTable(
-        contacts: pageItems,
+        contacts: filtered,
         store: store,
         selected: _selected,
-        onOpen: _open,
-        onToggle: _toggle,
-        onToggleAll: (v) => setState(() {
-          final ids = pageItems.map((x) => x.id);
-          v ? _selected.addAll(ids) : _selected.removeAll(ids);
-          if (v) messengerKey.currentState?.hideCurrentSnackBar();
+        sort: _segment == Segment.birthdays || _segment == Segment.trash ? null : _sort,
+        onSort: (s) => setState(() => _sort = s),
+        onTap: (c) => _tap(c, filtered),
+        onToggle: (c) => _tap(c, filtered, toggle: true),
+        onToggleAll: (all) => setState(() {
+          all ? _selected.addAll(filtered.map((c) => c.id)) : _selected.clear();
         }),
         onAddColumn: () => showFieldDialog(context, store: store, showInTable: true),
         onEditColumn: (f) => showFieldDialog(context, store: store, field: f),
       );
     } else {
-      body = ContactsGrid(
-        contacts: pageItems,
-        store: store,
-        selected: _selected,
-        onOpen: _open,
-        onToggle: _toggle,
+      body = ContactsGrid(contacts: filtered, store: store, selected: _selected, onTap: (c) => _tap(c, filtered));
+    }
+    return Focus(focusNode: _listFocus, onKeyEvent: (node, e) => _onListKey(e, filtered), child: body);
+  }
+
+  KeyEventResult _onListKey(KeyEvent e, List<Contact> visible) {
+    if (e is! KeyDownEvent && e is! KeyRepeatEvent) return KeyEventResult.ignored;
+    final key = e.logicalKey;
+    if (key == LogicalKeyboardKey.arrowDown || key == LogicalKeyboardKey.arrowRight) {
+      _move(1, visible);
+    } else if (key == LogicalKeyboardKey.arrowUp || key == LogicalKeyboardKey.arrowLeft) {
+      _move(-1, visible);
+    } else if (key == LogicalKeyboardKey.keyA && Os.primaryPressed) {
+      setState(() => _selected.addAll(visible.map((c) => c.id)));
+    } else if (key == LogicalKeyboardKey.escape) {
+      setState(_selected.clear);
+    } else if (key == LogicalKeyboardKey.backspace || key == LogicalKeyboardKey.delete) {
+      if (e is KeyDownEvent) _segment == Segment.trash ? _purge({..._selected}) : _trash({..._selected});
+    } else if (key == LogicalKeyboardKey.enter && _selected.length == 1) {
+      if (store.byId(_selected.first) case final c?) _edit(c);
+    } else {
+      return KeyEventResult.ignored;
+    }
+    return KeyEventResult.handled;
+  }
+
+  Widget _detail() {
+    final selected = [for (final id in _selected) ?store.byId(id)];
+    if (selected.isEmpty) {
+      return EmptyState(
+        icon: CupertinoIcons.person_crop_circle,
+        title: tr.noSelectionTitle,
+        subtitle: tr.noSelectionSubtitle(Os.mod, Os.shift),
       );
     }
+    if (selected.length == 1) {
+      final c = selected.single;
+      return ContactDetail(
+        key: ValueKey(c.id),
+        contact: c,
+        store: store,
+        onEdit: () => _edit(c),
+        onDelete: () => _trash({c.id}),
+        onRestore: () => _restore({c.id}),
+        onPurge: () => _purge({c.id}),
+      );
+    }
+    return _BulkPane(
+      contacts: selected,
+      store: store,
+      inTrash: _segment == Segment.trash,
+      onFavorite: (v) => store.setFavorite({..._selected}, v),
+      onExport: () => _export(selected),
+      onTrash: () => _trash({..._selected}),
+      onRestore: () => _restore({..._selected}),
+      onPurge: () => _purge({..._selected}),
+    );
+  }
+}
 
-    return Container(
-      decoration: cardDecoration(c),
-      clipBehavior: Clip.antiAlias,
-      child: Stack(
-        children: [
-          Column(
-            children: [
-              Expanded(child: body),
-              if (filtered.isNotEmpty) ...[
-                const Divider(),
-                PaginationBar(
-                  page: page,
-                  pageCount: pageCount,
-                  pageSize: _pageSize,
-                  total: filtered.length,
-                  onPage: (p) => setState(() => _page = p),
-                  onPageSize: (n) => setState(() {
-                    _pageSize = n;
-                    _page = 0;
-                  }),
+/// Узкая панель слева: логотип и разделы иконками.
+class _Rail extends StatelessWidget {
+  final Segment segment;
+  final int trashCount;
+  final ValueChanged<Segment> onSelect;
+  final VoidCallback onFields;
+  final VoidCallback onInterests;
+  final VoidCallback onSettings;
+  final VoidCallback onLock;
+
+  const _Rail({
+    required this.segment,
+    required this.trashCount,
+    required this.onSelect,
+    required this.onFields,
+    required this.onInterests,
+    required this.onSettings,
+    required this.onLock,
+  });
+
+  /// Пункты сверху (разделы) и снизу (интересы, поля, настройки, замок).
+  static const _items = 10;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    width: 84,
+    decoration: BoxDecoration(
+      color: Pal.rail,
+      // В светлой теме панель и фон белые — отделяем линией.
+      border: Pal.isDark ? null : Border(right: BorderSide(color: Pal.divider)),
+    ),
+    child: LayoutBuilder(
+      builder: (context, c) {
+        // Пункты сжимаются вместе с окном. А если места не хватает даже
+        // на сжатые (окно резко тянут), панель прокручивается — так
+        // переполнения нет при любом размере, без точных подсчётов.
+        const fixed = 40 + 50 + 16 + 16 + 24;
+        final itemHeight = ((c.maxHeight - fixed) / _items).clamp(40.0, 64.0);
+        return CustomScrollView(
+          slivers: [SliverFillRemaining(hasScrollBody: false, child: _column(context, itemHeight))],
+        );
+      },
+    ),
+  );
+
+  Widget _column(BuildContext context, double itemHeight) {
+    Widget item(IconData icon, String hint, {required bool active, required VoidCallback onTap, int badge = 0}) =>
+        Pressable(
+          onTap: onTap,
+          hint: hint,
+          // Панель у края окна — подсказка справа, а не снизу.
+          hintSide: HintSide.right,
+          builder: (context, hover, _) => AnimatedContainer(
+            duration: const Duration(milliseconds: 160),
+            width: 84,
+            height: itemHeight,
+            decoration: BoxDecoration(
+              color: active ? Pal.railActive : null,
+              borderRadius: const BorderRadius.horizontal(right: Radius.circular(14)),
+            ),
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                Icon(
+                  icon,
+                  size: itemHeight < 52 ? 21 : 24,
+                  color: active ? Pal.railActiveIcon : (hover ? Pal.text : Pal.muted),
                 ),
-              ],
-            ],
-          ),
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: 74,
-            child: Center(
-              child: AnimatedSwitcher(
-                duration: const Duration(milliseconds: 180),
-                transitionBuilder: (child, anim) => FadeTransition(
-                  opacity: anim,
-                  child: SlideTransition(
-                    position: Tween(begin: const Offset(0, 0.4), end: Offset.zero).animate(anim),
-                    child: child,
+                if (badge > 0)
+                  Positioned(
+                    top: itemHeight / 2 - 14,
+                    right: 26,
+                    child: Container(
+                      width: 8,
+                      height: 8,
+                      decoration: BoxDecoration(color: Pal.red, shape: BoxShape.circle),
+                    ),
                   ),
-                ),
-                child: _selected.isEmpty ? const SizedBox.shrink() : _bulkBar(),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _toggle(String id) => setState(() {
-        _selected.contains(id) ? _selected.remove(id) : _selected.add(id);
-        // Панель действий с выделенным встаёт на место тоста.
-        if (_selected.isNotEmpty) messengerKey.currentState?.hideCurrentSnackBar();
-      });
-
-  Widget _bulkBar() {
-    final c = context.colors;
-    if (_segment == Segment.trash) return _trashBar();
-    final selected = store.contacts.where((x) => _selected.contains(x.id)).toList();
-    final allFavorite = selected.every((x) => x.favorite);
-    return Container(
-      padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
-      decoration: cardDecoration(c).copyWith(
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.12),
-            blurRadius: 24,
-            offset: const Offset(0, 8),
-          ),
-        ],
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text('${_selected.length}', style: const TextStyle(fontWeight: FontWeight.w700)),
-          const SizedBox(width: 5),
-          Text(plural(_selected.length, 'выбран', 'выбрано', 'выбрано'),
-              style: TextStyle(color: c.textMuted)),
-          const SizedBox(width: 14),
-          AppButton(
-            label: allFavorite ? 'Из избранного' : 'В избранное',
-            icon: allFavorite ? Icons.star_outline_rounded : Icons.star_rounded,
-            onPressed: () => store.setFavorite({..._selected}, !allFavorite),
-          ),
-          const SizedBox(width: 8),
-          AppButton(
-            label: 'Экспорт',
-            icon: Icons.file_download_outlined,
-            onPressed: () => _export(selected),
-          ),
-          const SizedBox(width: 8),
-          AppButton(
-            label: 'Удалить',
-            icon: Icons.delete_outline_rounded,
-            danger: true,
-            onPressed: _deleteSelected,
-          ),
-          const SizedBox(width: 4),
-          IconButton(
-            tooltip: 'Снять выделение',
-            icon: Icon(Icons.close, size: 18, color: c.textMuted),
-            onPressed: () => setState(_selected.clear),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _trashBar() {
-    final c = context.colors;
-    return Container(
-      padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
-      decoration: cardDecoration(c).copyWith(
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.12),
-            blurRadius: 24,
-            offset: const Offset(0, 8),
-          ),
-        ],
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text('${_selected.length}', style: const TextStyle(fontWeight: FontWeight.w700)),
-          const SizedBox(width: 5),
-          Text(plural(_selected.length, 'выбран', 'выбрано', 'выбрано'),
-              style: TextStyle(color: c.textMuted)),
-          const SizedBox(width: 14),
-          AppButton(
-            label: 'Восстановить',
-            icon: Icons.restore_rounded,
-            onPressed: _restoreSelected,
-          ),
-          const SizedBox(width: 8),
-          AppButton(
-            label: 'Удалить навсегда',
-            icon: Icons.delete_forever_outlined,
-            danger: true,
-            onPressed: () => _purge({..._selected}),
-          ),
-          const SizedBox(width: 4),
-          IconButton(
-            tooltip: 'Снять выделение',
-            icon: Icon(Icons.close, size: 18, color: c.textMuted),
-            onPressed: () => setState(_selected.clear),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _StatsRow extends StatelessWidget {
-  final ContactStore store;
-  const _StatsRow({required this.store});
-
-  @override
-  Widget build(BuildContext context) {
-    final c = context.colors;
-    final now = DateTime.now();
-    final all = store.contacts;
-    int age(Contact x) => now.difference(x.createdAt).inDays;
-    final last30 = all.where((x) => age(x) < 30).length;
-    final prev30 = all.where((x) => age(x) >= 30 && age(x) < 60).length;
-    final favorites = all.where((x) => x.favorite).length;
-    final upcoming = all
-        .where((x) => (x.daysUntilBirthday(now) ?? 999) <= 30)
-        .toList()
-      ..sort((a, b) => a.daysUntilBirthday(now)!.compareTo(b.daysUntilBirthday(now)!));
-    final interests = store.interestCounts;
-
-    String nextBirthday() {
-      if (upcoming.isEmpty) return 'в ближайшие 30 дней';
-      final d = upcoming.first.daysUntilBirthday(now)!;
-      final name = upcoming.first.name.split(' ').first;
-      return d == 0 ? 'сегодня у $name' : 'ближайший — $name, через $d дн.';
-    }
-
-    final cards = [
-      _Stat(
-        title: 'Всего контактов',
-        value: '${all.length}',
-        note: last30 > 0 ? 'за 30 дней' : 'новых за месяц нет',
-        pill: last30 > 0 ? '+$last30' : null,
-      ),
-      _Stat(
-        title: 'Новые за месяц',
-        value: '$last30',
-        note: 'было $prev30',
-        pill: prev30 == 0
-            ? (last30 > 0 ? 'новые' : null)
-            : '${((last30 - prev30) / prev30 * 100).round().abs()}%',
-        pillUp: last30 >= prev30,
-      ),
-      _Stat(
-        title: 'Избранные',
-        value: '$favorites',
-        note: 'от всей базы',
-        pill: all.isEmpty ? null : '${(favorites / all.length * 100).round()}%',
-        neutral: true,
-      ),
-      _Stat(
-        title: 'Дни рождения',
-        value: '${upcoming.length}',
-        note: nextBirthday(),
-      ),
-      _Stat(
-        title: 'Сфер интересов',
-        value: '${interests.length}',
-        note: interests.isEmpty ? 'пока не указаны' : 'популярная — ${interests.first.key}',
-      ),
-    ];
-
-    return Container(
-      decoration: cardDecoration(c),
-      child: IntrinsicHeight(
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            for (var i = 0; i < cards.length; i++) ...[
-              if (i > 0) VerticalDivider(color: c.border, width: 1),
-              Expanded(child: cards[i]),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _Stat extends StatelessWidget {
-  final String title;
-  final String value;
-  final String note;
-  final String? pill;
-  final bool pillUp;
-  final bool neutral;
-
-  const _Stat({
-    required this.title,
-    required this.value,
-    required this.note,
-    this.pill,
-    this.pillUp = true,
-    this.neutral = false,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final c = context.colors;
-    final Color pillBg, pillFg;
-    if (neutral) {
-      (pillBg, pillFg) = (c.accentSoft, c.accent);
-    } else if (pillUp) {
-      (pillBg, pillFg) = (c.successSoft, c.success);
-    } else {
-      (pillBg, pillFg) = (c.danger.withValues(alpha: 0.1), c.danger);
-    }
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 16, 16, 16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Flexible(
-                child: Text(title,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w500)),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          Text(value,
-              style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w700, height: 1.1)),
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              if (pill != null) ...[
-                Tag(
-                  pill!,
-                  icon: neutral ? null : (pillUp ? Icons.arrow_upward_rounded : Icons.arrow_downward_rounded),
-                  background: pillBg,
-                  foreground: pillFg,
-                  fontSize: 11.5,
-                ),
-                const SizedBox(width: 6),
               ],
-              Expanded(
-                child: Text(
-                  note,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(fontSize: 12.5, color: c.textMuted),
-                ),
-              ),
-            ],
+            ),
           ),
-        ],
-      ),
+        );
+
+    return Column(
+      children: [
+        // На Mac — место под кнопки окна: они поверх содержимого.
+        SizedBox(height: Os.isMac ? 40 : 16),
+        Pressable(
+          onTap: () => showAbout(context),
+          hint: tr.about,
+          hintSide: HintSide.right,
+          builder: (context, _, _) => Image.asset('assets/images/logo.png', width: 50, height: 50),
+        ),
+        const SizedBox(height: 16),
+        for (final s in Segment.values)
+          if (s != Segment.settings)
+            item(
+              s.icon,
+              '${s.label} (${HotkeysScope.of(context).of(s.hotkey!).label})',
+              active: segment == s,
+              onTap: () => onSelect(s),
+              badge: s == Segment.trash ? trashCount : 0,
+            ),
+        // Spacer прижимает нижние пункты вниз, но не меньше 24 точек.
+        const SizedBox(height: 24),
+        const Spacer(),
+        item(CupertinoIcons.tag, tr.interests, active: false, onTap: onInterests),
+        item(CupertinoIcons.slider_horizontal_3, tr.fieldsAndSections, active: false, onTap: onFields),
+        item(
+          CupertinoIcons.gear,
+          '${tr.settings} (${HotkeysScope.of(context).of(HotkeyAction.settings).label})',
+          active: segment == Segment.settings,
+          onTap: onSettings,
+        ),
+        item(
+          CupertinoIcons.lock,
+          '${tr.lock} (${HotkeysScope.of(context).of(HotkeyAction.lock).label})',
+          active: false,
+          onTap: onLock,
+        ),
+        const SizedBox(height: 16),
+      ],
     );
   }
 }
 
-class _FilterChip extends StatelessWidget {
-  final String label;
-  final Color? dot;
-  final VoidCallback onRemove;
+/// Несколько выбранных контактов: общие действия.
+class _BulkPane extends StatelessWidget {
+  final List<Contact> contacts;
+  final ContactStore store;
+  final bool inTrash;
+  final ValueChanged<bool> onFavorite;
+  final VoidCallback onExport;
+  final VoidCallback onTrash;
+  final VoidCallback onRestore;
+  final VoidCallback onPurge;
 
-  const _FilterChip({required this.label, this.dot, required this.onRemove});
-
-  @override
-  Widget build(BuildContext context) {
-    final c = context.colors;
-    return Container(
-      padding: const EdgeInsets.fromLTRB(10, 5, 5, 5),
-      decoration: BoxDecoration(
-        color: c.surfaceMuted,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: c.border),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (dot != null) ...[
-            Container(
-              width: 8,
-              height: 8,
-              decoration: BoxDecoration(color: dot, borderRadius: BorderRadius.circular(2)),
-            ),
-            const SizedBox(width: 6),
-          ],
-          Text(label, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
-          const SizedBox(width: 2),
-          InkWell(
-            borderRadius: BorderRadius.circular(6),
-            onTap: onRemove,
-            child: Padding(
-              padding: const EdgeInsets.all(2),
-              child: Icon(Icons.close_rounded, size: 15, color: c.textMuted),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _EmptyState extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final String subtitle;
-  final Widget action;
-
-  /// Вместо значка — логотип приложения (для самого первого запуска).
-  final bool showLogo;
-
-  const _EmptyState({
-    required this.icon,
-    this.showLogo = false,
-    required this.title,
-    required this.subtitle,
-    required this.action,
+  const _BulkPane({
+    required this.contacts,
+    required this.store,
+    required this.inTrash,
+    required this.onFavorite,
+    required this.onExport,
+    required this.onTrash,
+    required this.onRestore,
+    required this.onPurge,
   });
 
   @override
   Widget build(BuildContext context) {
-    final c = context.colors;
+    final allFavorite = contacts.every((c) => c.favorite);
+    final shown = contacts.take(5).toList();
     return Center(
-      child: SizedBox(
-        width: 340,
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(28),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (showLogo)
-              Image.asset('assets/images/logo.png', width: 128, height: 128)
-            else
-              Container(
-                width: 64,
-                height: 64,
-                decoration: BoxDecoration(
-                  color: c.accentSoft,
-                  borderRadius: BorderRadius.circular(18),
-                ),
-                child: Icon(icon, size: 30, color: c.accent),
+            SizedBox(
+              width: 52.0 + (shown.length - 1) * 32,
+              height: 52,
+              child: Stack(
+                children: [
+                  for (var i = 0; i < shown.length; i++)
+                    Positioned(
+                      left: i * 32.0,
+                      child: ContactAvatar(
+                        name: shown[i].name,
+                        photo: store.photoOf(shown[i]),
+                        radius: 24,
+                        ring: Pal.card,
+                      ),
+                    ),
+                ],
               ),
-            const SizedBox(height: 18),
-            Text(title, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700)),
-            const SizedBox(height: 6),
-            Text(
-              subtitle,
-              textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 13.5, color: c.textMuted, height: 1.45),
             ),
-            const SizedBox(height: 18),
-            action,
+            const SizedBox(height: 16),
+            Text(tr.selectedCount(contacts.length), style: T.title),
+            const SizedBox(height: 22),
+            SizedBox(
+              width: 260,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: inTrash
+                    ? [
+                        Btn.primary(
+                          label: tr.restore,
+                          icon: CupertinoIcons.arrow_counterclockwise,
+                          onPressed: onRestore,
+                        ),
+                        const SizedBox(height: 10),
+                        Btn(
+                          label: tr.deleteForever,
+                          icon: CupertinoIcons.trash,
+                          kind: BtnKind.danger,
+                          onPressed: onPurge,
+                        ),
+                      ]
+                    : [
+                        Btn(
+                          label: allFavorite ? tr.removeFromFavorites : tr.toFavorites,
+                          icon: allFavorite ? CupertinoIcons.star_slash : CupertinoIcons.star,
+                          onPressed: () => onFavorite(!allFavorite),
+                        ),
+                        const SizedBox(height: 10),
+                        Btn(label: tr.exportCsv, icon: CupertinoIcons.tray_arrow_up, onPressed: onExport),
+                        const SizedBox(height: 10),
+                        Btn(label: tr.toTrash, icon: CupertinoIcons.trash, kind: BtnKind.danger, onPressed: onTrash),
+                      ],
+              ),
+            ),
           ],
         ),
       ),

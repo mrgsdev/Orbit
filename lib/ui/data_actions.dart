@@ -2,23 +2,40 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:file_selector/file_selector.dart';
-import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
+import 'package:flutter/cupertino.dart';
+import 'package:intl/intl.dart' show DateFormat;
+import 'package:url_launcher/url_launcher.dart';
 
 import '../data/backup.dart';
 import '../data/contact_store.dart';
+import '../data/csv_export.dart';
+import '../models/contact.dart';
 import '../data/crypto.dart';
 import '../data/importers.dart';
 import 'lock_screen.dart';
 import 'theme.dart';
 import 'widgets.dart';
+import '../l10n/strings.dart';
 
-String _contactsWord(int n) => '$n ${plural(n, 'контакт', 'контакта', 'контактов')}';
+/// Экспорт в CSV с уведомлением о результате.
+Future<void> exportContacts(ContactStore store, List<Contact> contacts) async {
+  if (contacts.isEmpty) {
+    showToast(tr.nothingToExport);
+    return;
+  }
+  try {
+    if (await exportContactsCsv(contacts, store.allFields.toList())) {
+      showToast(tr.savedContacts(contacts.length));
+    }
+  } catch (e) {
+    showToast(tr.saveFileFailed(e));
+  }
+}
 
 /// Импорт из CSV (в том числе экспорта Orbit, Google, Excel) и vCard.
 Future<void> importContacts(BuildContext context, ContactStore store) async {
-  const types = XTypeGroup(
-    label: 'Контакты',
+  final types = XTypeGroup(
+    label: tr.contactsFileType,
     extensions: ['csv', 'vcf', 'vcard', 'txt'],
     uniformTypeIdentifiers: ['public.comma-separated-values-text', 'public.vcard', 'public.plain-text'],
   );
@@ -30,63 +47,54 @@ Future<void> importContacts(BuildContext context, ContactStore store) async {
     final text = utf8.decode(await file.readAsBytes(), allowMalformed: true);
     parsed = parseContactsFile(text, store.allFields.toList());
   } catch (e) {
-    if (context.mounted) showToast(context, 'Не удалось прочитать файл: $e');
+    showToast(tr.readFileFailed(e));
     return;
   }
   if (!context.mounted) return;
   if (parsed.contacts.isEmpty) {
-    showToast(context, 'В файле не нашлось контактов');
+    showToast(tr.noContactsInFile);
     return;
   }
 
   final fresh = parsed.contacts.where((c) => !store.isDuplicate(c)).toList();
   final dupes = parsed.contacts.length - fresh.length;
   if (fresh.isEmpty) {
-    showToast(context, 'Все ${_contactsWord(dupes)} из файла уже есть в базе');
+    showToast(tr.allAlreadyExist(dupes));
     return;
   }
   final ok = await confirmDialog(
     context,
-    title: 'Импорт из «${file.name}»',
-    message: 'Найдено ${_contactsWord(parsed.contacts.length)}.'
-        '${dupes > 0 ? ' ${_contactsWord(dupes)} уже есть в базе — их пропустим.' : ''}',
-    confirmLabel: 'Импортировать ${fresh.length}',
+    title: tr.importTitle(file.name),
+    message: tr.importMessage(parsed.contacts.length, dupes),
+    confirmLabel: tr.importConfirm(fresh.length),
   );
   if (!ok) return;
 
   final ids = await store.addImported(fresh, photos: parsed.photos);
-  showUndoToast('Импортировано: ${_contactsWord(ids.length)}', onUndo: () => store.purge(ids));
+  showUndoToast(tr.imported(ids.length), onUndo: () => store.purge(ids));
 }
 
 /// Зашифрованная резервная копия всей базы с фото.
 Future<void> createBackup(BuildContext context, ContactStore store, Vault vault) async {
   final location = await getSaveLocation(
     suggestedName: 'orbit-backup-${DateFormat('yyyy-MM-dd').format(DateTime.now())}.${Backup.extension}',
-    acceptedTypeGroups: const [
-      XTypeGroup(label: 'Резервная копия Orbit', extensions: [Backup.extension]),
-    ],
+    acceptedTypeGroups: [XTypeGroup(label: tr.backupFileType, extensions: [Backup.extension])],
   );
   if (location == null) return;
   try {
-    final bytes = await Backup.build(
-      snapshot: await store.snapshot(),
-      cipher: store.cipher,
-      envelope: vault.envelope!,
-    );
+    final bytes = await Backup.build(snapshot: await store.snapshot(), cipher: store.cipher, envelope: vault.envelope!);
     await File(location.path).writeAsBytes(bytes, flush: true);
-    if (context.mounted) {
-      showToast(context, 'Резервная копия сохранена. Для восстановления на другом Mac нужен recovery code');
-    }
+    showToast(tr.backupSaved);
   } catch (e) {
-    if (context.mounted) showToast(context, 'Не удалось сохранить копию: $e');
+    showToast(tr.backupSaveFailed(e));
   }
 }
 
 /// Восстановление из .orbit: копию с этого Mac открывает текущий ключ,
 /// копию с другой установки — recovery code.
 Future<void> restoreBackup(BuildContext context, ContactStore store) async {
-  final file = await openFile(acceptedTypeGroups: const [
-    XTypeGroup(label: 'Резервная копия Orbit', extensions: [Backup.extension]),
+  final file = await openFile(acceptedTypeGroups: [
+    XTypeGroup(label: tr.backupFileType, extensions: [Backup.extension]),
   ]);
   if (file == null || !context.mounted) return;
 
@@ -94,7 +102,7 @@ Future<void> restoreBackup(BuildContext context, ContactStore store) async {
   try {
     backup = Backup.parse(await file.readAsBytes());
   } on FormatException catch (e) {
-    if (context.mounted) showToast(context, e.message);
+    showToast(e.message);
     return;
   }
   if (!context.mounted) return;
@@ -104,44 +112,37 @@ Future<void> restoreBackup(BuildContext context, ContactStore store) async {
     snapshot = await backup.open(store.cipher);
   } on WrongSecretException {
     if (!context.mounted) return;
-    snapshot = await showDialog<Map<String, dynamic>>(
-      context: context,
-      builder: (_) => _RecoveryCodeDialog(backup: backup),
-    );
+    snapshot = await showModal<Map<String, dynamic>>(context, builder: (_) => _RecoveryCodeSheet(backup: backup));
   }
   if (snapshot == null || !context.mounted) return;
 
   final created = backup.createdAt;
   final ok = await confirmDialog(
     context,
-    title: 'Восстановить из копии?',
-    message: 'В копии ${_contactsWord(backup.contactCount)}'
-        '${created == null ? '' : ' от ${DateFormat('d MMMM y, HH:mm', 'ru').format(created)}'}. '
-        'Новые люди добавятся, а у тех, кто уже есть, останется более свежая версия.',
-    confirmLabel: 'Восстановить',
+    title: tr.restoreTitle,
+    message: tr.restoreMessage(
+      backup.contactCount,
+      created == null ? null : DateFormat('d MMMM y, HH:mm', tr.locale).format(created),
+    ),
+    confirmLabel: tr.restore,
   );
   if (!ok) return;
 
   final result = await store.mergeSnapshot(snapshot);
-  if (context.mounted) {
-    showToast(
-      context,
-      result.added + result.updated == 0
-          ? 'Всё из копии уже есть в базе'
-          : 'Добавлено: ${result.added}, обновлено: ${result.updated}',
-    );
-  }
+  showToast(result.added + result.updated == 0
+      ? tr.restoreNothingNew
+      : tr.restoreResult(result.added, result.updated));
 }
 
-class _RecoveryCodeDialog extends StatefulWidget {
+class _RecoveryCodeSheet extends StatefulWidget {
   final Backup backup;
-  const _RecoveryCodeDialog({required this.backup});
+  const _RecoveryCodeSheet({required this.backup});
 
   @override
-  State<_RecoveryCodeDialog> createState() => _RecoveryCodeDialogState();
+  State<_RecoveryCodeSheet> createState() => _RecoveryCodeSheetState();
 }
 
-class _RecoveryCodeDialogState extends State<_RecoveryCodeDialog> {
+class _RecoveryCodeSheetState extends State<_RecoveryCodeSheet> {
   final _code = TextEditingController();
   String? _error;
   bool _busy = false;
@@ -155,7 +156,7 @@ class _RecoveryCodeDialogState extends State<_RecoveryCodeDialog> {
   Future<void> _open() async {
     if (_busy) return;
     if (!RecoveryCode.looksValid(_code.text)) {
-      setState(() => _error = 'В коде ${RecoveryCode.length} символов');
+      setState(() => _error = tr.codeLength(RecoveryCode.length));
       return;
     }
     setState(() {
@@ -164,77 +165,61 @@ class _RecoveryCodeDialogState extends State<_RecoveryCodeDialog> {
     });
     try {
       final snapshot = await widget.backup.openWithRecovery(_code.text);
-      if (mounted) Navigator.pop(context, snapshot);
+      if (mounted) Navigator.of(context).pop(snapshot);
     } on WrongSecretException {
       setState(() {
         _busy = false;
-        _error = 'Код не подходит к этой копии';
+        _error = tr.codeNotForBackup;
       });
     }
   }
 
   @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('Нужен recovery code',
-          style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
-      content: SizedBox(
-        width: 400,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(
-              'Копия сделана на другой установке Orbit. Введите recovery code, '
-              'который показала та установка при настройке.',
-              style: TextStyle(color: context.colors.textMuted, height: 1.4),
-            ),
-            const SizedBox(height: 16),
-            TextField(
+  Widget build(BuildContext context) => ModalScaffold(
+        title: tr.needRecoveryTitle,
+        subtitle: tr.needRecoverySubtitle,
+        width: 500,
+        onCancel: () => Navigator.of(context).pop(),
+        onSubmit: _open,
+        actions: [
+          Btn(label: tr.cancel, onPressed: () => Navigator.of(context).pop()),
+          Btn.primary(label: _busy ? tr.checking : tr.open, onPressed: _busy ? null : _open),
+        ],
+        children: [
+          Labeled(
+            label: tr.recoveryFromOtherInstall,
+            error: _error,
+            child: Field(
               controller: _code,
               autofocus: true,
-              autocorrect: false,
-              enableSuggestions: false,
-              style: const TextStyle(fontFamily: 'Menlo', fontSize: 15),
-              decoration: InputDecoration(
-                labelText: 'Recovery code',
-                errorText: _error,
-                prefixIcon: const Icon(Icons.key_outlined, size: 19),
-              ),
+              placeholder: 'XXXX-XXXX-XXXX-XXXX-XXXX-XXXX',
+              icon: CupertinoIcons.lock_shield,
+              error: _error != null,
+              style: T.body.copyWith(fontFamily: 'Menlo', fontSize: 14),
               onSubmitted: (_) => _open(),
             ),
-          ],
-        ),
-      ),
-      actionsPadding: const EdgeInsets.fromLTRB(24, 0, 24, 20),
-      actions: [
-        AppButton(label: 'Отмена', onPressed: () => Navigator.pop(context)),
-        AppButton(label: _busy ? 'Проверяем…' : 'Открыть', primary: true, onPressed: _busy ? null : _open),
-      ],
-    );
-  }
+          ),
+        ],
+      );
 }
 
 /// Смена PIN: нужен текущий PIN, ключ данных и recovery code не меняются.
 Future<void> changePin(BuildContext context, ContactStore store, Vault vault) async {
-  final changed = await showDialog<bool>(
-    context: context,
-    builder: (_) => _ChangePinDialog(store: store, vault: vault),
-  );
-  if (changed == true && context.mounted) showToast(context, 'PIN-код изменён');
+  final changed = await showModal<bool>(context, builder: (_) => _ChangePinSheet(store: store, vault: vault));
+  if (changed == true) showToast(tr.pinChanged);
 }
 
-class _ChangePinDialog extends StatefulWidget {
+class _ChangePinSheet extends StatefulWidget {
   final ContactStore store;
   final Vault vault;
 
-  const _ChangePinDialog({required this.store, required this.vault});
+  const _ChangePinSheet({required this.store, required this.vault});
 
   @override
-  State<_ChangePinDialog> createState() => _ChangePinDialogState();
+  State<_ChangePinSheet> createState() => _ChangePinSheetState();
 }
 
-class _ChangePinDialogState extends State<_ChangePinDialog> {
+class _ChangePinSheetState extends State<_ChangePinSheet> {
   final _current = TextEditingController();
   final _pin = TextEditingController();
   final _confirm = TextEditingController();
@@ -264,36 +249,155 @@ class _ChangePinDialogState extends State<_ChangePinDialog> {
     } on WrongSecretException {
       setState(() {
         _busy = false;
-        _currentError = 'Неверный текущий PIN';
+        _currentError = tr.wrongCurrentPin;
       });
       return;
     }
     await widget.vault.changePin(widget.store.cipher, _pin.text);
-    if (mounted) Navigator.pop(context, true);
+    if (mounted) Navigator.of(context).pop(true);
+  }
+
+  @override
+  Widget build(BuildContext context) => ModalScaffold(
+        title: tr.changePinTitle,
+        subtitle: tr.changePinSubtitle,
+        width: 460,
+        onCancel: () => Navigator.of(context).pop(),
+        onSubmit: _save,
+        actions: [
+          Btn(label: tr.cancel, onPressed: () => Navigator.of(context).pop()),
+          Btn.primary(label: _busy ? tr.saving : tr.save, onPressed: _busy ? null : _save),
+        ],
+        children: [
+          PinField(controller: _current, placeholder: tr.currentPin, autofocus: true, errorText: _currentError),
+          const SizedBox(height: 14),
+          PinField(controller: _pin, placeholder: tr.newPinOrPassword),
+          const SizedBox(height: 10),
+          PinField(controller: _confirm, placeholder: tr.repeat, errorText: _error, onSubmitted: (_) => _save()),
+          const SizedBox(height: 10),
+          Text('${tr.minLength(minPinLength)}.', style: T.small),
+        ],
+      );
+}
+
+/// Открывает папку с данными Orbit в Finder (или в Проводнике на Windows).
+Future<void> openAppFolder(ContactStore store) async {
+  final ok = await launchUrl(Uri.directory(store.rootDir.path));
+  if (!ok) showToast(tr.openFolderFailed(store.rootDir.path));
+}
+
+/// Показ recovery code — только после ввода PIN.
+Future<void> showRecoveryCode(BuildContext context, ContactStore store, Vault vault) =>
+    showModal<void>(context, builder: (_) => _RevealCodeSheet(store: store, vault: vault));
+
+class _RevealCodeSheet extends StatefulWidget {
+  final ContactStore store;
+  final Vault vault;
+  const _RevealCodeSheet({required this.store, required this.vault});
+
+  @override
+  State<_RevealCodeSheet> createState() => _RevealCodeSheetState();
+}
+
+class _RevealCodeSheetState extends State<_RevealCodeSheet> {
+  final _pin = TextEditingController();
+  String? _error;
+  bool _busy = false;
+
+  /// Пусто — ещё не проверили PIN; null внутри — код в базе не сохранён.
+  ({String? code})? _result;
+
+  @override
+  void dispose() {
+    _pin.dispose();
+    super.dispose();
+  }
+
+  Future<void> _reveal() async {
+    if (_busy || _pin.text.isEmpty) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      final code = await widget.vault.revealRecoveryCode(_pin.text);
+      setState(() {
+        _busy = false;
+        _result = (code: code);
+      });
+    } on WrongSecretException {
+      _pin.clear();
+      setState(() {
+        _busy = false;
+        _error = tr.wrongPin;
+      });
+    }
+  }
+
+  Future<void> _regenerate() async {
+    final ok = await confirmDialog(
+      context,
+      title: tr.regenerateTitle,
+      message: tr.regenerateMessage,
+      confirmLabel: tr.create,
+    );
+    if (!ok) return;
+    setState(() => _busy = true);
+    final code = await widget.vault.regenerateRecoveryCode(widget.store.cipher);
+    setState(() {
+      _busy = false;
+      _result = (code: code);
+    });
   }
 
   @override
   Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('Сменить PIN-код', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
-      content: SizedBox(
-        width: 380,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            PinField(controller: _current, label: 'Текущий PIN', autofocus: true, errorText: _currentError),
-            const SizedBox(height: 12),
-            PinField(controller: _pin, label: 'Новый PIN-код или пароль'),
-            const SizedBox(height: 12),
-            PinField(controller: _confirm, label: 'Повторите', errorText: _error, onSubmitted: (_) => _save()),
-          ],
+    void close() => Navigator.of(context).pop();
+    final result = _result;
+    final List<Widget> children;
+    final List<Widget> actions;
+    if (result == null) {
+      children = [
+        Text(
+          tr.revealIntro,
+          style: T.body.copyWith(color: Pal.muted, height: 1.45),
         ),
-      ),
-      actionsPadding: const EdgeInsets.fromLTRB(24, 0, 24, 20),
-      actions: [
-        AppButton(label: 'Отмена', onPressed: () => Navigator.pop(context)),
-        AppButton(label: _busy ? 'Сохраняем…' : 'Сохранить', primary: true, onPressed: _busy ? null : _save),
-      ],
+        const SizedBox(height: 16),
+        PinField(controller: _pin, placeholder: tr.pinOrPassword, autofocus: true, errorText: _error, onSubmitted: (_) => _reveal()),
+      ];
+      actions = [
+        Btn(label: tr.cancel, onPressed: close),
+        Btn.primary(label: _busy ? tr.checking : tr.show, onPressed: _busy ? null : _reveal),
+      ];
+    } else if (result.code != null) {
+      children = [
+        RecoveryCodeBox(code: result.code!),
+        const SizedBox(height: 12),
+        Text(
+          tr.revealKeepSafe,
+          style: T.small.copyWith(height: 1.45),
+        ),
+      ];
+      actions = [Btn.primary(label: tr.done, onPressed: close)];
+    } else {
+      children = [
+        Text(
+          tr.revealLegacy,
+          style: T.body.copyWith(color: Pal.muted, height: 1.45),
+        ),
+      ];
+      actions = [
+        Btn(label: tr.cancel, onPressed: close),
+        Btn.primary(label: _busy ? tr.creating : tr.createNewCode, onPressed: _busy ? null : _regenerate),
+      ];
+    }
+    return ModalScaffold(
+      title: 'Recovery code',
+      width: 500,
+      onCancel: close,
+      onSubmit: result == null ? _reveal : close,
+      actions: actions,
+      children: children,
     );
   }
 }

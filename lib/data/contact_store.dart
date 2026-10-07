@@ -24,6 +24,13 @@ class ContactStore extends ChangeNotifier {
   final List<Contact> _all = [];
   final List<FieldSection> _sections = [];
 
+  /// Интересы, созданные заранее, — даже если их пока нет ни у кого.
+  final Set<String> _interestCatalog = {};
+
+  /// Скрытые столбцы таблицы контактов.
+  final Set<String> _hiddenColumns = {};
+  final List<String> _columnOrder = [];
+
   /// Расшифрованные фото — чтобы не расшифровывать их при каждой перерисовке.
   final Map<String, Uint8List> _photoCache = {};
 
@@ -35,6 +42,9 @@ class ContactStore extends ChangeNotifier {
       _all.where((c) => c.isDeleted).toList()..sort((a, b) => b.deletedAt!.compareTo(a.deletedAt!));
 
   DataCipher get cipher => _cipher;
+
+  /// Папка с данными приложения — для «Открыть папку приложения».
+  Directory get rootDir => _root;
   List<FieldSection> get sections => List.unmodifiable(_sections);
   Iterable<CustomField> get allFields => _sections.expand((s) => s.fields);
   List<CustomField> get tableFields =>
@@ -56,6 +66,18 @@ class ContactStore extends ChangeNotifier {
       ]);
     _sort();
     final plainSchema = await _loadSchema();
+    final (prefs, _) = await _readJson(_prefsFile);
+    if (prefs is Map) {
+      _interestCatalog
+        ..clear()
+        ..addAll(((prefs['interests'] as List?) ?? const []).cast<String>());
+      _hiddenColumns
+        ..clear()
+        ..addAll(((prefs['hiddenColumns'] as List?) ?? const []).cast<String>());
+      _columnOrder
+        ..clear()
+        ..addAll(((prefs['columnOrder'] as List?) ?? const []).cast<String>());
+    }
     if (plainDb) await _persist();
     if (plainSchema) await _writeJson(_schemaFile, _sections.map((s) => s.toJson()).toList());
     await _encryptLegacyPhotos();
@@ -65,6 +87,13 @@ class ContactStore extends ChangeNotifier {
   }
 
   File get _schemaFile => File('${_root.path}/schema.json');
+  File get _prefsFile => File('${_root.path}/prefs.json');
+
+  Future<void> _savePrefs() => _writeJson(_prefsFile, {
+        'interests': _interestCatalog.toList()..sort(),
+        'hiddenColumns': _hiddenColumns.toList()..sort(),
+        'columnOrder': _columnOrder,
+      });
 
   /// Возвращает true, если файл схемы был незашифрованным.
   Future<bool> _loadSchema() async {
@@ -105,7 +134,70 @@ class ContactStore extends ChangeNotifier {
     return null;
   }
 
-  Set<String> get allInterests => {for (final c in contacts) ...c.interests};
+  /// Все известные интересы: созданные заранее и указанные у контактов.
+  Set<String> get allInterests => {..._interestCatalog, for (final c in contacts) ...c.interests};
+
+  /// Все интересы с числом активных контактов, по алфавиту.
+  List<MapEntry<String, int>> get interestCatalog {
+    final counts = {for (final i in allInterests) i: 0};
+    for (final c in contacts) {
+      for (final i in c.interests) {
+        counts[i] = counts[i]! + 1;
+      }
+    }
+    return counts.entries.toList()..sort((a, b) => a.key.toLowerCase().compareTo(b.key.toLowerCase()));
+  }
+
+  /// Сколько активных контактов с этим интересом.
+  int interestUsage(String interest) => contacts.where((c) => c.interests.contains(interest)).length;
+
+  /// Создаёт интерес заранее. Возвращает false, если такой уже есть.
+  Future<bool> addInterest(String name) async {
+    final value = name.trim();
+    if (value.isEmpty || allInterests.any((i) => i.toLowerCase() == value.toLowerCase())) return false;
+    _interestCatalog.add(value);
+    await _savePrefs();
+    notifyListeners();
+    return true;
+  }
+
+  /// Удаляет интерес отовсюду — и из списка, и у всех контактов, включая корзину.
+  Future<void> deleteInterest(String interest) async {
+    _interestCatalog.remove(interest);
+    var changed = false;
+    for (var i = 0; i < _all.length; i++) {
+      final c = _all[i];
+      if (c.interests.contains(interest)) {
+        _all[i] = c.copyWith(interests: [...c.interests]..remove(interest));
+        changed = true;
+      }
+    }
+    await _savePrefs();
+    if (changed) await _persist();
+    notifyListeners();
+  }
+
+  Set<String> get hiddenColumns => Set.unmodifiable(_hiddenColumns);
+
+  Future<void> setColumnHidden(String column, bool hidden) async {
+    hidden ? _hiddenColumns.add(column) : _hiddenColumns.remove(column);
+    // Таблица меняется сразу, не дожидаясь записи на диск.
+    notifyListeners();
+    await _savePrefs();
+  }
+
+  /// Порядок столбцов таблицы, как его расставил пользователь. Пустой —
+  /// порядок по умолчанию.
+  List<String> get columnOrder => List.unmodifiable(_columnOrder);
+
+  Future<void> setColumnOrder(List<String> order) async {
+    _columnOrder
+      ..clear()
+      ..addAll(order);
+    // Таблица меняется сразу, не дожидаясь записи на диск.
+    notifyListeners();
+    await _savePrefs();
+  }
 
   /// Интересы с числом контактов, от популярных к редким.
   List<MapEntry<String, int>> get interestCounts {
@@ -196,17 +288,26 @@ class ContactStore extends ChangeNotifier {
 
   // ── Импорт и резервные копии ──
 
-  /// Ключ для поиска дублей: имя плюс телефон или почта.
-  static String _identity(Contact c) {
-    final digits = c.phone.replaceAll(RegExp(r'\D'), '');
-    final phone = digits.length > 10 ? digits.substring(digits.length - 10) : digits;
-    return '${c.name.trim().toLowerCase()}|${phone.isNotEmpty ? phone : c.email.trim().toLowerCase()}';
-  }
+  /// Телефоны и почта в сравнимом виде: последние 10 цифр номера
+  /// (+7 и 8 в начале не важны) и адрес в нижнем регистре.
+  static Set<String> _reachKeys(Contact c) => {
+        for (final p in c.phones)
+          if (p.value.replaceAll(RegExp(r'\D'), '') case final d when d.isNotEmpty)
+            'tel:${d.length > 10 ? d.substring(d.length - 10) : d}',
+        for (final e in c.emails)
+          if (e.value.trim().isNotEmpty) 'mail:${e.value.trim().toLowerCase()}',
+      };
 
-  /// Уже есть такой человек среди активных контактов.
+  /// Уже есть такой человек среди активных: то же имя и общий номер или
+  /// почта. Если ни номеров, ни почты нет ни у кого — совпадение по имени.
   bool isDuplicate(Contact c) {
-    final key = _identity(c);
-    return contacts.any((x) => _identity(x) == key);
+    final name = c.name.trim().toLowerCase();
+    final keys = _reachKeys(c);
+    return contacts.any((x) {
+      if (x.name.trim().toLowerCase() != name) return false;
+      final other = _reachKeys(x);
+      return keys.isEmpty && other.isEmpty || keys.intersection(other).isNotEmpty;
+    });
   }
 
   /// Добавляет импортированные контакты; [photos] — фото по id контакта.
@@ -219,9 +320,10 @@ class ContactStore extends ChangeNotifier {
       final c = Contact(
         id: _uuid.v4(),
         name: d.name,
-        phone: d.phone,
+        phones: d.phones,
         telegram: d.telegram,
-        email: d.email,
+        instagram: d.instagram,
+        emails: d.emails,
         position: d.position,
         company: d.company,
         whereMet: d.whereMet,
@@ -248,6 +350,7 @@ class ContactStore extends ChangeNotifier {
   Future<Map<String, dynamic>> snapshot() async => {
         'contacts': _all.map((c) => c.toJson()).toList(),
         'sections': _sections.map((s) => s.toJson()).toList(),
+        'interests': _interestCatalog.toList(),
         'photos': {
           for (final c in _all)
             if (c.photoFile != null)
@@ -278,6 +381,11 @@ class ContactStore extends ChangeNotifier {
         _all[i] = restored;
         updated++;
       }
+    }
+    final interests = ((snap['interests'] as List?) ?? const []).cast<String>();
+    if (interests.any((i) => !_interestCatalog.contains(i))) {
+      _interestCatalog.addAll(interests);
+      await _savePrefs();
     }
     for (final e in (snap['sections'] as List?) ?? const []) {
       final s = FieldSection.fromJson(e as Map<String, dynamic>);
